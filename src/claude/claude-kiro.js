@@ -466,12 +466,27 @@ async initializeAuth(forceRefresh = false) {
         this.authMethod = this.authMethod || mergedCredentials.authMethod;
         this.expiresAt = this.expiresAt || mergedCredentials.expiresAt;
         this.profileArn = this.profileArn || mergedCredentials.profileArn;
-        this.region = this.region || mergedCredentials.region;
+
+        // Extract region from profileArn (most reliable source)
+        // ARN format: arn:aws:codewhisperer:REGION:ACCOUNT_ID:profile/PROFILE_ID
+        let regionFromArn = null;
+        if (this.profileArn) {
+            const arnParts = this.profileArn.split(':');
+            if (arnParts.length >= 4 && arnParts[3]) {
+                regionFromArn = arnParts[3];
+                console.debug(`[Kiro Auth] Extracted region from profileArn: ${regionFromArn}`);
+            }
+        }
+
+        // Priority: 1. region from profileArn, 2. region from credentials, 3. default
+        this.region = regionFromArn || this.region || mergedCredentials.region;
 
         // Ensure region is set before using it in URLs
         if (!this.region) {
-            console.warn('[Kiro Auth] Region not found in credentials. Using default region us-east-1 for URLs.');
+            console.warn('[Kiro Auth] Region not found in credentials or profileArn. Using default region us-east-1 for URLs.');
             this.region = 'us-east-1'; // Set default region
+        } else if (regionFromArn && mergedCredentials.region && regionFromArn !== mergedCredentials.region) {
+            console.warn(`[Kiro Auth] Region mismatch: profileArn has '${regionFromArn}', credentials has '${mergedCredentials.region}'. Using '${regionFromArn}' from profileArn.`);
         }
 
         this.refreshUrl = (this.config.KIRO_REFRESH_URL || KIRO_CONSTANTS.REFRESH_URL).replace("{{region}}", this.region);
