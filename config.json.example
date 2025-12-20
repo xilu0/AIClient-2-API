@@ -34,5 +34,5 @@
     "KIRO_BASE_URL": "https://codewhisperer.{{region}}.amazonaws.com/generateAssistantResponse",
     "KIRO_AMAZON_Q_URL": "https://codewhisperer.{{region}}.amazonaws.com/SendMessageStreaming",
     "KIRO_USAGE_LIMITS_URL": "https://q.{{region}}.amazonaws.com/getUsageLimits",
-    "KIRO_MAX_TOOL_DESC_LENGTH": 10000
+    "KIRO_MAX_TOOL_DESC_LENGTH": 10240
   }
