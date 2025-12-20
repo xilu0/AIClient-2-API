@@ -35,6 +35,7 @@ const FULL_MODEL_MAPPING = {
     "claude-opus-4-5":"claude-opus-4.5",
     "claude-opus-4-5-20251101":"claude-opus-4.5",
     "claude-haiku-4-5":"claude-haiku-4.5",
+    "claude-haiku-4-5-20251001":"claude-haiku-4.5",
     "claude-sonnet-4-5": "CLAUDE_SONNET_4_5_20250929_V1_0",
     "claude-sonnet-4-5-20250929": "CLAUDE_SONNET_4_5_20250929_V1_0",
     "claude-sonnet-4-20250514": "CLAUDE_SONNET_4_20250514_V1_0",
@@ -440,8 +441,13 @@ async initializeAuth(forceRefresh = false) {
                     const filePath = path.join(dirPath, file);
                     const credentials = await loadCredentialsFromFile(filePath);
                     if (credentials) {
-                        // 保留已有的 expiresAt,避免被覆盖
-                        credentials.expiresAt = mergedCredentials.expiresAt;
+                        // 保留已有的关键字段,避免被其他 SSO 文件覆盖
+                        const preservedFields = ['expiresAt', 'region', 'authMethod', 'profileArn', 'accessToken', 'refreshToken'];
+                        for (const field of preservedFields) {
+                            if (mergedCredentials[field]) {
+                                credentials[field] = mergedCredentials[field];
+                            }
+                        }
                         Object.assign(mergedCredentials, credentials);
                         console.debug(`[Kiro Auth] Loaded Client credentials from ${file}`);
                     }
@@ -615,16 +621,50 @@ async initializeAuth(forceRefresh = false) {
         const codewhispererModel = MODEL_MAPPING[model] || MODEL_MAPPING[this.modelName];
         
         let toolsContext = {};
+        const overflowToolDescriptions = [];  // 存储超长工具描述，稍后添加到 system prompt
+
+        // Kiro API has a limit on tool description length (~10KB)
+        const maxToolDescLength = this.config.KIRO_MAX_TOOL_DESC_LENGTH || 10000;
         if (tools && Array.isArray(tools) && tools.length > 0) {
             toolsContext = {
-                tools: tools.map(tool => ({
-                    toolSpecification: {
-                        name: tool.name,
-                        description: tool.description || "",
-                        inputSchema: { json: tool.input_schema || {} }
+                tools: tools.map(tool => {
+                    let description = tool.description || "";
+                    const originalLength = description.length;
+
+                    if (originalLength > maxToolDescLength) {
+                        // 保存完整描述用于添加到 system prompt
+                        overflowToolDescriptions.push({
+                            name: tool.name,
+                            fullDescription: description
+                        });
+
+                        // 工具定义中只保留简短引用
+                        description = `[Full documentation for "${tool.name}" is provided in the system context below under "# Extended Tool Documentation".]`;
+                        console.log(`[Kiro] Tool "${tool.name}" description (${originalLength} chars) moved to system prompt`);
                     }
-                }))
+                    return {
+                        toolSpecification: {
+                            name: tool.name,
+                            description: description,
+                            inputSchema: { json: tool.input_schema || {} }
+                        }
+                    };
+                })
             };
+        }
+
+        // 如果有超长工具描述，添加到 system prompt 尾部
+        if (overflowToolDescriptions.length > 0) {
+            const toolDocsSection = overflowToolDescriptions.map(t =>
+                `## ${t.name} Tool\n${t.fullDescription}`
+            ).join('\n\n');
+
+            systemPrompt = (systemPrompt || '') +
+                '\n\n# Extended Tool Documentation\n' +
+                'The following tools have detailed documentation:\n\n' +
+                toolDocsSection;
+
+            console.log(`[Kiro] Added ${overflowToolDescriptions.length} tool descriptions to system prompt (total added: ${toolDocsSection.length} chars)`);
         }
 
         const history = [];
@@ -870,8 +910,7 @@ async initializeAuth(forceRefresh = false) {
         if (this.authMethod === KIRO_CONSTANTS.AUTH_METHOD_SOCIAL) {
             request.profileArn = this.profileArn;
         }
-        
-        // fs.writeFile('claude-kiro-request'+Date.now()+'.json', JSON.stringify(request));
+
         return request;
     }
 
@@ -1025,6 +1064,9 @@ async initializeAuth(forceRefresh = false) {
             }
 
             console.error('[Kiro] API call failed:', error.message);
+            if (error.response?.data) {
+                console.error('[Kiro] API error response:', JSON.stringify(error.response.data).substring(0, 500));
+            }
             throw error;
         }
     }
