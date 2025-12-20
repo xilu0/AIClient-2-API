@@ -23,6 +23,8 @@
     "supertest": "^6.3.3"
   },
   "scripts": {
+    "start": "node src/api-server.js",
+    "dev:kiro": "node src/api-server.js --api-key justlikemakiaiclient --host 127.0.0.1 --model-provider claude-kiro-oauth --kiro-oauth-creds-file ~/.aws/sso/cache/kiro-auth-token.json",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
