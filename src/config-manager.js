@@ -76,6 +76,7 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
             KIRO_OAUTH_CREDS_BASE64: null,
             KIRO_OAUTH_CREDS_FILE_PATH: null,
             QWEN_OAUTH_CREDS_FILE_PATH: null,
+            ANTIGRAVITY_OAUTH_CREDS_FILE_PATH: null,
             PROJECT_ID: null,
             // Provider URLs
             QWEN_BASE_URL: null,
@@ -189,6 +190,13 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
             if (i + 1 < args.length) {
                 currentConfig.ANTIGRAVITY_BASE_URL_AUTOPUSH = args[i + 1];
                 i++;
+            }
+        } else if (args[i] === '--antigravity-oauth-creds-file') {
+            if (i + 1 < args.length) {
+                currentConfig.ANTIGRAVITY_OAUTH_CREDS_FILE_PATH = args[i + 1];
+                i++;
+            } else {
+                console.warn(`[Config Warning] --antigravity-oauth-creds-file flag requires a value.`);
             }
         } else if (args[i] === '--kiro-refresh-url') {
             if (i + 1 < args.length) {
