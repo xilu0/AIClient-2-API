@@ -25,7 +25,8 @@
   "scripts": {
     "start": "node src/api-server.js",
     "dev:kiro": "node src/api-server.js --api-key justlikemakiaiclient --host 127.0.0.1 --model-provider claude-kiro-oauth --kiro-oauth-creds-file ~/.aws/sso/cache/kiro-auth-token.json",
-    "dev:antigravity": "node src/api-server.js --api-key justlikemakiaiclient --host 127.0.0.1 --model-provider gemini-antigravity --antigravity-oauth-creds-file configs/antigravity/1766240718284_oauth_creds.json",
+    "dev:antigravity": "node src/api-server.js --api-key justlikemakiaiclient --host 127.0.0.1 --model-provider gemini-antigravity --antigravity-oauth-creds-file ~/.antigravity/oauth_creds.json",
+    "gen:antigravity": "node scripts/generate-antigravity-creds.js",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
