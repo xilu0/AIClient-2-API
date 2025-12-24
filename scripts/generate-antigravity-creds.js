@@ -12,12 +12,12 @@
  *   node generate-antigravity-creds.js /app/antigravity/account1.json
  */
 
-const http = require('http');
-const https = require('https');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-const { exec } = require('child_process');
+import http from 'http';
+import https from 'https';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
+import { exec } from 'child_process';
 
 // Antigravity OAuth 配置
 const OAUTH_CONFIG = {
