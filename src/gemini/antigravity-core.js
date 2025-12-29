@@ -224,7 +224,7 @@ function ensureRolesInContents(requestBody) {
 }
 
 export class AntigravityApiService {
-    constructor(config) {
+    constructor(config, options = {}) {
         // 配置 OAuth2Client 使用自定义的 HTTP agent
         this.authClient = new OAuth2Client({
             clientId: OAUTH_CLIENT_ID,
@@ -252,6 +252,115 @@ export class AntigravityApiService {
             this.baseUrlAutopush
             // ANTIGRAVITY_BASE_URL_PROD // 生产环境已注释
         ];
+
+        // Pool manager for 429 account switching
+        this.providerPoolManager = options.providerPoolManager;
+        this.providerType = options.providerType || 'gemini-antigravity';
+        this.currentUuid = options.currentUuid;
+        this.triedUuids = new Set(); // 跟踪当前请求已尝试的账号
+    }
+
+    /**
+     * 重置已尝试账号列表（每次新请求调用）
+     */
+    _resetTriedAccounts() {
+        this.triedUuids.clear();
+        if (this.currentUuid) {
+            this.triedUuids.add(this.currentUuid); // 当前账号已在使用
+        }
+    }
+
+    /**
+     * 尝试切换到下一个可用账号
+     * @returns {Promise<Object|null>} 新账号配置，或 null 如果没有更多账号
+     */
+    async _tryNextAccount() {
+        if (!this.providerPoolManager) {
+            return null;
+        }
+
+        // 标记当前账号为已尝试
+        if (this.currentUuid) {
+            this.triedUuids.add(this.currentUuid);
+        }
+
+        // 获取所有可用账号，排除已尝试的
+        const allProviders = this.providerPoolManager.providerStatus[this.providerType] || [];
+
+        // 优先选择健康账号
+        let availableProviders = allProviders.filter(p =>
+            p.config.isHealthy &&
+            !p.config.isDisabled &&
+            !this.triedUuids.has(p.config.uuid)
+        );
+
+        // 如果没有健康账号，尝试最近标记为不健康的账号（可能已恢复）
+        if (availableProviders.length === 0) {
+            availableProviders = allProviders.filter(p =>
+                !p.config.isDisabled &&
+                !this.triedUuids.has(p.config.uuid)
+            );
+            if (availableProviders.length > 0) {
+                console.log(`[Antigravity] No healthy accounts available, trying ${availableProviders.length} unhealthy account(s)`);
+            }
+        }
+
+        if (availableProviders.length === 0) {
+            console.log(`[Antigravity] No more accounts available. Tried: ${Array.from(this.triedUuids).join(', ')}`);
+            return null;
+        }
+
+        // 选择下一个账号 (LRU - 最久未使用)
+        const nextProvider = availableProviders.sort((a, b) => {
+            const timeA = a.config.lastUsed ? new Date(a.config.lastUsed).getTime() : 0;
+            const timeB = b.config.lastUsed ? new Date(b.config.lastUsed).getTime() : 0;
+            return timeA - timeB;
+        })[0];
+
+        const remainingCount = availableProviders.length - 1;
+        console.log(`[Antigravity] Switching from ${this.currentUuid} to ${nextProvider.config.uuid} (${remainingCount} remaining)`);
+
+        // 更新 providerPoolManager 中的 lastUsed 和 usageCount
+        nextProvider.config.lastUsed = new Date().toISOString();
+        nextProvider.config.usageCount = (nextProvider.config.usageCount || 0) + 1;
+
+        // 更新当前账号信息
+        this.currentUuid = nextProvider.config.uuid;
+
+        // 重新初始化认证（使用新账号的凭证）
+        await this._reinitializeWithNewCredentials(nextProvider.config);
+
+        return nextProvider.config;
+    }
+
+    /**
+     * 使用新凭证重新初始化
+     * @param {Object} newConfig - 新账号的配置
+     */
+    async _reinitializeWithNewCredentials(newConfig) {
+        // 获取新的 OAuth 凭证路径
+        const newCredsPath = newConfig.ANTIGRAVITY_OAUTH_CREDS_FILE_PATH;
+
+        if (newCredsPath) {
+            // 更新凭证路径
+            this.oauthCredsFilePath = newCredsPath;
+
+            // 更新 PROJECT_ID（如果新配置有的话）
+            if (newConfig.PROJECT_ID) {
+                this.projectId = newConfig.PROJECT_ID;
+            }
+
+            // 重新读取凭证并设置
+            try {
+                const data = await fs.readFile(newCredsPath, "utf8");
+                const credentials = JSON.parse(data);
+                this.authClient.setCredentials(credentials);
+                console.log(`[Antigravity] Credentials loaded from ${newCredsPath}`);
+            } catch (error) {
+                console.error(`[Antigravity] Failed to load credentials from ${newCredsPath}:`, error.message);
+                throw error;
+            }
+        }
     }
 
     async initialize() {
@@ -554,15 +663,23 @@ export class AntigravityApiService {
             }
 
             if (error.response?.status === 429) {
+                // 1. 先尝试切换 Base URL
                 if (baseURLIndex + 1 < this.baseURLs.length) {
                     console.log(`[Antigravity API] Rate limited on ${baseURL}. Trying next base URL...`);
                     return this.callApi(method, body, isRetry, retryCount, baseURLIndex + 1);
-                } else if (retryCount < maxRetries) {
-                    const delay = baseDelay * Math.pow(2, retryCount);
-                    console.log(`[Antigravity API] Rate limited. Retrying in ${delay}ms...`);
-                    await new Promise(resolve => setTimeout(resolve, delay));
-                    return this.callApi(method, body, isRetry, retryCount + 1, 0);
                 }
+
+                // 2. 所有 Base URL 都失败了，尝试切换到池中的下一个账号
+                const nextAccount = await this._tryNextAccount();
+                if (nextAccount) {
+                    console.log(`[Antigravity API] Rate limited. Switching to account: ${nextAccount.uuid}`);
+                    // 重置 base URL index，用新账号从头开始
+                    return this.callApi(method, body, false, 0, 0);
+                }
+
+                // 3. 所有账号都试过了，直接失败（不再指数退避重试）
+                console.log(`[Antigravity API] All accounts exhausted. Failing immediately.`);
+                throw error;
             }
 
             if (!error.response && baseURLIndex + 1 < this.baseURLs.length) {
@@ -627,17 +744,25 @@ export class AntigravityApiService {
             }
 
             if (error.response?.status === 429) {
+                // 1. 先尝试切换 Base URL
                 if (baseURLIndex + 1 < this.baseURLs.length) {
                     console.log(`[Antigravity API] Rate limited on ${baseURL}. Trying next base URL...`);
                     yield* this.streamApi(method, body, isRetry, retryCount, baseURLIndex + 1);
                     return;
-                } else if (retryCount < maxRetries) {
-                    const delay = baseDelay * Math.pow(2, retryCount);
-                    console.log(`[Antigravity API] Rate limited during stream. Retrying in ${delay}ms...`);
-                    await new Promise(resolve => setTimeout(resolve, delay));
-                    yield* this.streamApi(method, body, isRetry, retryCount + 1, 0);
+                }
+
+                // 2. 所有 Base URL 都失败了，尝试切换到池中的下一个账号
+                const nextAccount = await this._tryNextAccount();
+                if (nextAccount) {
+                    console.log(`[Antigravity API] Rate limited during stream. Switching to account: ${nextAccount.uuid}`);
+                    // 重置 base URL index，用新账号从头开始
+                    yield* this.streamApi(method, body, false, 0, 0);
                     return;
                 }
+
+                // 3. 所有账号都试过了，直接失败（不再指数退避重试）
+                console.log(`[Antigravity API] All accounts exhausted during stream. Failing immediately.`);
+                throw error;
             }
 
             if (!error.response && baseURLIndex + 1 < this.baseURLs.length) {
@@ -688,6 +813,9 @@ export class AntigravityApiService {
     }
 
     async generateContent(model, requestBody) {
+        // 每次新请求重置已尝试账号列表
+        this._resetTriedAccounts();
+
         console.log(`[Antigravity Auth Token] Time until expiry: ${formatExpiryTime(this.authClient.credentials.expiry_date)}`);
 
         let selectedModel = model;
@@ -711,6 +839,9 @@ export class AntigravityApiService {
     }
 
     async * generateContentStream(model, requestBody) {
+        // 每次新请求重置已尝试账号列表
+        this._resetTriedAccounts();
+
         console.log(`[Antigravity Auth Token] Time until expiry: ${formatExpiryTime(this.authClient.credentials.expiry_date)}`);
 
         let selectedModel = model;

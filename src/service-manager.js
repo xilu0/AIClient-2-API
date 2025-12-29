@@ -271,8 +271,13 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
         }
     }
     
-    const service = getServiceAdapter(serviceConfig);
-    
+    // 传递 pool manager 相关信息，用于 Antigravity 429 时切换账号
+    const service = getServiceAdapter(serviceConfig, {
+        providerPoolManager,
+        providerType: actualProviderType,
+        currentUuid: selectedUuid
+    });
+
     return {
         service,
         serviceConfig,

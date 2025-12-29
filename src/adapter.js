@@ -111,9 +111,18 @@ export class GeminiApiServiceAdapter extends ApiServiceAdapter {
 
 // Antigravity API 服务适配器
 export class AntigravityApiServiceAdapter extends ApiServiceAdapter {
-    constructor(config) {
+    constructor(config, options = {}) {
         super();
-        this.antigravityApiService = new AntigravityApiService(config);
+        // 存储 pool manager 相关信息，用于 429 时切换账号
+        this.providerPoolManager = options.providerPoolManager;
+        this.providerType = options.providerType || 'gemini-antigravity';
+        this.currentUuid = options.currentUuid;
+
+        this.antigravityApiService = new AntigravityApiService(config, {
+            providerPoolManager: this.providerPoolManager,
+            providerType: this.providerType,
+            currentUuid: this.currentUuid
+        });
     }
 
     async generateContent(model, requestBody) {
@@ -361,36 +370,55 @@ export class QwenApiServiceAdapter extends ApiServiceAdapter {
 export const serviceInstances = {};
 
 // 服务适配器工厂
-export function getServiceAdapter(config) {
+export function getServiceAdapter(config, options = {}) {
     console.log(`[Adapter] getServiceAdapter, provider: ${config.MODEL_PROVIDER}, uuid: ${config.uuid}`);
     const provider = config.MODEL_PROVIDER;
     const providerKey = config.uuid ? provider + config.uuid : provider;
-    if (!serviceInstances[providerKey]) {
-        switch (provider) {
-            case MODEL_PROVIDER.OPENAI_CUSTOM:
-                serviceInstances[providerKey] = new OpenAIApiServiceAdapter(config);
-                break;
-            case MODEL_PROVIDER.OPENAI_CUSTOM_RESPONSES:
-                serviceInstances[providerKey] = new OpenAIResponsesApiServiceAdapter(config);
-                break;
-            case MODEL_PROVIDER.GEMINI_CLI:
-                serviceInstances[providerKey] = new GeminiApiServiceAdapter(config);
-                break;
-            case MODEL_PROVIDER.ANTIGRAVITY:
-                serviceInstances[providerKey] = new AntigravityApiServiceAdapter(config);
-                break;
-            case MODEL_PROVIDER.CLAUDE_CUSTOM:
-                serviceInstances[providerKey] = new ClaudeApiServiceAdapter(config);
-                break;
-            case MODEL_PROVIDER.KIRO_API:
-                serviceInstances[providerKey] = new KiroApiServiceAdapter(config);
-                break;
-            case MODEL_PROVIDER.QWEN_API:
-                serviceInstances[providerKey] = new QwenApiServiceAdapter(config);
-                break;
-            default:
-                throw new Error(`Unsupported model provider: ${provider}`);
+
+    // 检查是否已有缓存实例
+    if (serviceInstances[providerKey]) {
+        // 对于 Antigravity，更新 pool manager 相关选项（如果提供了新的）
+        if (provider === MODEL_PROVIDER.ANTIGRAVITY && options.providerPoolManager) {
+            const adapter = serviceInstances[providerKey];
+            adapter.providerPoolManager = options.providerPoolManager;
+            adapter.providerType = options.providerType || adapter.providerType;
+            adapter.currentUuid = options.currentUuid || adapter.currentUuid;
+            // 同步更新到底层服务
+            if (adapter.antigravityApiService) {
+                adapter.antigravityApiService.providerPoolManager = options.providerPoolManager;
+                adapter.antigravityApiService.providerType = options.providerType || adapter.antigravityApiService.providerType;
+                adapter.antigravityApiService.currentUuid = options.currentUuid || adapter.antigravityApiService.currentUuid;
+            }
         }
+        return serviceInstances[providerKey];
+    }
+
+    // 创建新实例
+    switch (provider) {
+        case MODEL_PROVIDER.OPENAI_CUSTOM:
+            serviceInstances[providerKey] = new OpenAIApiServiceAdapter(config);
+            break;
+        case MODEL_PROVIDER.OPENAI_CUSTOM_RESPONSES:
+            serviceInstances[providerKey] = new OpenAIResponsesApiServiceAdapter(config);
+            break;
+        case MODEL_PROVIDER.GEMINI_CLI:
+            serviceInstances[providerKey] = new GeminiApiServiceAdapter(config);
+            break;
+        case MODEL_PROVIDER.ANTIGRAVITY:
+            // Antigravity 支持 429 时切换账号，需要传递 pool manager
+            serviceInstances[providerKey] = new AntigravityApiServiceAdapter(config, options);
+            break;
+        case MODEL_PROVIDER.CLAUDE_CUSTOM:
+            serviceInstances[providerKey] = new ClaudeApiServiceAdapter(config);
+            break;
+        case MODEL_PROVIDER.KIRO_API:
+            serviceInstances[providerKey] = new KiroApiServiceAdapter(config);
+            break;
+        case MODEL_PROVIDER.QWEN_API:
+            serviceInstances[providerKey] = new QwenApiServiceAdapter(config);
+            break;
+        default:
+            throw new Error(`Unsupported model provider: ${provider}`);
     }
     return serviceInstances[providerKey];
 }
