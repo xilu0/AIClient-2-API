@@ -990,7 +990,6 @@ async initializeAuth(forceRefresh = false) {
             request.profileArn = this.profileArn;
         }
 
-        // fs.writeFile('claude-kiro-request'+Date.now()+'.json', JSON.stringify(request));
         return request;
     }
 
@@ -1502,6 +1501,30 @@ async initializeAuth(forceRefresh = false) {
         }
     }
 
+    /**
+     * Calculate token distribution based on 1:2:25 ratio
+     */
+    calculateTokenDistribution(inputTokens) {
+        if (inputTokens < 100) {
+            return {
+                input_tokens: inputTokens,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0
+            };
+        }
+
+        const totalParts = 28; // 1 + 2 + 25
+        const inputPart = Math.floor(inputTokens * 1 / totalParts);
+        const creationPart = Math.floor(inputTokens * 2 / totalParts);
+        const readPart = inputTokens - inputPart - creationPart;
+
+        return {
+            input_tokens: inputPart,
+            cache_creation_input_tokens: creationPart,
+            cache_read_input_tokens: readPart
+        };
+    }
+
     // 真正的流式传输实现
     async * generateContentStream(model, requestBody) {
         if (!this.isInitialized) await this.initialize();
@@ -1516,6 +1539,7 @@ async initializeAuth(forceRefresh = false) {
         console.log(`[Kiro] Calling generateContentStream with model: ${finalModel} (real streaming)`);
         
         const inputTokens = this.estimateInputTokens(requestBody);
+        const { input_tokens: splitInputTokens, cache_creation_input_tokens, cache_read_input_tokens } = this.calculateTokenDistribution(inputTokens);
         const messageId = `${uuidv4()}`;
         
         try {
@@ -1527,7 +1551,12 @@ async initializeAuth(forceRefresh = false) {
                     type: "message",
                     role: "assistant",
                     model: model,
-                    usage: { input_tokens: inputTokens, output_tokens: 0 },
+                    usage: { 
+                        input_tokens: splitInputTokens, 
+                        cache_creation_input_tokens: cache_creation_input_tokens,
+                        cache_read_input_tokens: cache_read_input_tokens,
+                        output_tokens: 0 
+                    },
                     content: []
                 }
             };
@@ -1690,7 +1719,13 @@ async initializeAuth(forceRefresh = false) {
             yield {
                 type: "message_delta",
                 delta: { stop_reason: toolCalls.length > 0 ? "tool_use" : "end_turn" },
-                usage: { input_tokens: inputTokens, output_tokens: outputTokens, total_tokens: totalTokens }
+                usage: { 
+                    input_tokens: splitInputTokens, 
+                    cache_creation_input_tokens: cache_creation_input_tokens,
+                    cache_read_input_tokens: cache_read_input_tokens,
+                    output_tokens: outputTokens, 
+                    total_tokens: totalTokens 
+                }
             };
 
             // 7. 发送 message_stop 事件
@@ -1751,6 +1786,7 @@ async initializeAuth(forceRefresh = false) {
      */
     buildClaudeResponse(content, isStream = false, role = 'assistant', model, toolCalls = null, inputTokens = 0) {
         const messageId = `${uuidv4()}`;
+        const { input_tokens: splitInputTokens, cache_creation_input_tokens, cache_read_input_tokens } = this.calculateTokenDistribution(inputTokens);
 
         if (isStream) {
             // Kiro API is "pseudo-streaming", so we'll send a few events to simulate
@@ -1766,7 +1802,9 @@ async initializeAuth(forceRefresh = false) {
                     role: role,
                     model: model,
                     usage: {
-                        input_tokens: inputTokens,
+                        input_tokens: splitInputTokens,
+                        cache_creation_input_tokens: cache_creation_input_tokens,
+                        cache_read_input_tokens: cache_read_input_tokens,
                         output_tokens: 0 // Will be updated in message_delta
                     },
                     content: [] // Content will be streamed via content_block_delta
@@ -1917,7 +1955,9 @@ async initializeAuth(forceRefresh = false) {
                 stop_reason: stopReason,
                 stop_sequence: null,
                 usage: {
-                    input_tokens: inputTokens,
+                    input_tokens: splitInputTokens,
+                    cache_creation_input_tokens: cache_creation_input_tokens,
+                    cache_read_input_tokens: cache_read_input_tokens,
                     output_tokens: outputTokens
                 },
                 content: contentArray

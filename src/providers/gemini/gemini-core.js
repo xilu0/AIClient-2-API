@@ -54,7 +54,12 @@ function extract_model_from_anti_model(model) {
 function toGeminiApiResponse(codeAssistResponse) {
     if (!codeAssistResponse) return null;
     const compliantResponse = { candidates: codeAssistResponse.candidates };
-    if (codeAssistResponse.usageMetadata) compliantResponse.usageMetadata = codeAssistResponse.usageMetadata;
+    if (codeAssistResponse.usageMetadata) {
+        compliantResponse.usageMetadata = codeAssistResponse.usageMetadata;
+        if (compliantResponse.usageMetadata.cachedContentTokenCount === undefined) {
+            compliantResponse.usageMetadata.cachedContentTokenCount = 0;
+        }
+    }
     if (codeAssistResponse.promptFeedback) compliantResponse.promptFeedback = codeAssistResponse.promptFeedback;
     if (codeAssistResponse.automaticFunctionCallingHistory) compliantResponse.automaticFunctionCallingHistory = codeAssistResponse.automaticFunctionCallingHistory;
     return compliantResponse;

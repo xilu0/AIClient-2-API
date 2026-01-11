@@ -574,11 +574,15 @@ function convertStreamToNonStream(stream) {
     }
     if (usageRaw) {
         result.usageMetadata = usageRaw;
+        if (result.usageMetadata.cachedContentTokenCount === undefined) {
+            result.usageMetadata.cachedContentTokenCount = 0;
+        }
     } else if (!result.usageMetadata) {
         result.usageMetadata = {
             promptTokenCount: 0,
             candidatesTokenCount: 0,
-            totalTokenCount: 0
+            totalTokenCount: 0,
+            cachedContentTokenCount: 0
         };
     }
     
@@ -605,6 +609,9 @@ function toGeminiApiResponse(antigravityResponse) {
 
     if (antigravityResponse.usageMetadata) {
         compliantResponse.usageMetadata = antigravityResponse.usageMetadata;
+        if (compliantResponse.usageMetadata.cachedContentTokenCount === undefined) {
+            compliantResponse.usageMetadata.cachedContentTokenCount = 0;
+        }
     }
 
     if (antigravityResponse.promptFeedback) {
