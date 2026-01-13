@@ -10,6 +10,7 @@ import { API_ACTIONS, formatExpiryTime, isRetryableNetworkError } from '../../ut
 import { getProviderModels } from '../provider-models.js';
 import { handleGeminiCliOAuth } from '../../auth/oauth-handlers.js';
 import { getProxyConfigForProvider, getGoogleAuthProxyConfig } from '../../utils/proxy-utils.js';
+import { normalizeGeminiUsage } from '../../converters/usage/index.js';
 
 // 配置 HTTP/HTTPS agent 限制连接池大小，避免资源泄漏
 const httpAgent = new http.Agent({
@@ -54,7 +55,9 @@ function extract_model_from_anti_model(model) {
 function toGeminiApiResponse(codeAssistResponse) {
     if (!codeAssistResponse) return null;
     const compliantResponse = { candidates: codeAssistResponse.candidates };
-    if (codeAssistResponse.usageMetadata) compliantResponse.usageMetadata = codeAssistResponse.usageMetadata;
+    if (codeAssistResponse.usageMetadata) {
+        compliantResponse.usageMetadata = normalizeGeminiUsage(codeAssistResponse.usageMetadata);
+    }
     if (codeAssistResponse.promptFeedback) compliantResponse.promptFeedback = codeAssistResponse.promptFeedback;
     if (codeAssistResponse.automaticFunctionCallingHistory) compliantResponse.automaticFunctionCallingHistory = codeAssistResponse.automaticFunctionCallingHistory;
     return compliantResponse;

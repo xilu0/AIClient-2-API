@@ -14,6 +14,7 @@ import { getProviderModels } from '../provider-models.js';
 import { handleGeminiAntigravityOAuth } from '../../auth/oauth-handlers.js';
 import { getProxyConfigForProvider, getGoogleAuthProxyConfig } from '../../utils/proxy-utils.js';
 import { cleanJsonSchemaProperties } from '../../converters/utils.js';
+import { normalizeGeminiUsage, UsageNormalizerFactory } from '../../converters/usage/index.js';
 
 // 配置 HTTP/HTTPS agent 限制连接池大小，避免资源泄漏
 const httpAgent = new http.Agent({
@@ -582,21 +583,17 @@ function convertStreamToNonStream(stream) {
         result.responseId = responseId;
     }
     if (usageRaw) {
-        result.usageMetadata = usageRaw;
+        result.usageMetadata = normalizeGeminiUsage(usageRaw);
     } else if (!result.usageMetadata) {
-        result.usageMetadata = {
-            promptTokenCount: 0,
-            candidatesTokenCount: 0,
-            totalTokenCount: 0
-        };
+        result.usageMetadata = UsageNormalizerFactory.getNormalizer('gemini').getDefaultUsage();
     }
-    
+
     // 包装为最终格式
     const output = {
         response: result,
         traceId: traceId || ''
     };
-    
+
     return output;
 }
 
@@ -613,7 +610,7 @@ function toGeminiApiResponse(antigravityResponse) {
     };
 
     if (antigravityResponse.usageMetadata) {
-        compliantResponse.usageMetadata = antigravityResponse.usageMetadata;
+        compliantResponse.usageMetadata = normalizeGeminiUsage(antigravityResponse.usageMetadata);
     }
 
     if (antigravityResponse.promptFeedback) {

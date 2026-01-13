@@ -10,6 +10,7 @@ import { getProviderModels } from '../provider-models.js';
 import { countTokens } from '@anthropic-ai/tokenizer';
 import { configureAxiosProxy } from '../../utils/proxy-utils.js';
 import { isRetryableNetworkError } from '../../utils/common.js';
+import { calculateKiroTokenDistribution } from '../../converters/usage/index.js';
 
 const KIRO_THINKING = {
     MAX_BUDGET_TOKENS: 24576,
@@ -1606,6 +1607,9 @@ async initializeAuth(forceRefresh = false) {
 
         let inputTokens = 0;
         let contextUsagePercentage = null;
+        // 计算 token 分布（用于 usage 统计）
+        const estimatedInputTokens = this.estimateInputTokens(requestBody);
+        const { input_tokens: splitInputTokens, cache_creation_input_tokens, cache_read_input_tokens } = calculateKiroTokenDistribution(estimatedInputTokens);
         const messageId = `${uuidv4()}`;
 
         const thinkingRequested = requestBody?.thinking?.type === 'enabled';
@@ -2034,6 +2038,7 @@ async initializeAuth(forceRefresh = false) {
      */
     buildClaudeResponse(content, isStream = false, role = 'assistant', model, toolCalls = null, inputTokens = 0) {
         const messageId = `${uuidv4()}`;
+        const { input_tokens: splitInputTokens, cache_creation_input_tokens, cache_read_input_tokens } = calculateKiroTokenDistribution(inputTokens);
 
         if (isStream) {
             // Kiro API is "pseudo-streaming", so we'll send a few events to simulate
