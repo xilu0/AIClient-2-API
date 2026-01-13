@@ -1568,27 +1568,22 @@ async initializeAuth(forceRefresh = false) {
                 content_block: { type: "text", text: "" }
             };
 
-            let totalContent = '';
+            let outputContent = '';
             let outputTokens = 0;
             const toolCalls = [];
             let currentToolCall = null;  // 用于累积结构化工具调用
-            let contextUsagePercentage = null;  // 用于存储上下文使用百分比
 
             // 3. 流式接收并发送每个 content_block_delta
             for await (const event of this.streamApiReal('', finalModel, requestBody)) {
                 if (event.type === 'content' && event.content) {
-                    totalContent += event.content;
+                    outputContent += event.content;
                     // 不再每个 chunk 都计算 token，改为最后统一计算，避免阻塞事件循环
-                    
+
                     yield {
                         type: "content_block_delta",
                         index: 0,
                         delta: { type: "text_delta", text: event.content }
                     };
-                } else if (event.type === 'contextUsage') {
-                    // 捕获上下文使用百分比
-                    contextUsagePercentage = event.contextUsagePercentage;
-                    console.log(`[Kiro] Received contextUsagePercentage: ${contextUsagePercentage}%`);
                 } else if (event.type === 'toolUse') {
                     const tc = event.toolUse;
                     // 工具调用事件（包含 name 和 toolUseId）
@@ -1653,7 +1648,7 @@ async initializeAuth(forceRefresh = false) {
             }
             
             // 检查文本内容中的 bracket 格式工具调用
-            const bracketToolCalls = parseBracketToolCalls(totalContent);
+            const bracketToolCalls = parseBracketToolCalls(outputContent);
             if (bracketToolCalls && bracketToolCalls.length > 0) {
                 for (const btc of bracketToolCalls) {
                     toolCalls.push({
@@ -1698,23 +1693,12 @@ async initializeAuth(forceRefresh = false) {
             }
 
             // 6. 发送 message_delta 事件
-            // 如果有 contextUsagePercentage，使用它来计算 token
-            // 总上下文 200k tokens，通过百分比计算总使用量，再减去输入 token 得到输出 token
-            let totalTokens = 0;
-            if (contextUsagePercentage !== null && contextUsagePercentage > 0) {
-                const totalContextTokens = KIRO_CONSTANTS.TOTAL_CONTEXT_TOKENS;
-                // totalUsedTokens 就是通过百分比计算出的总使用量，直接作为 total_tokens
-                totalTokens = Math.round(totalContextTokens * contextUsagePercentage / 100);
-                outputTokens = Math.max(0, totalTokens - inputTokens);
-                console.log(`[Kiro] Token calculation from contextUsagePercentage: total=${totalTokens}, input=${inputTokens}, output=${outputTokens}`);
-            } else {
-                // 回退到原来的计算方式
-                outputTokens = this.countTextTokens(totalContent);
-                for (const tc of toolCalls) {
-                    outputTokens += this.countTextTokens(JSON.stringify(tc.input || {}));
-                }
-                totalTokens = inputTokens + outputTokens;
+            // 使用 tokenizer 计算本次输出的 token 数量
+            outputTokens = this.countTextTokens(outputContent);
+            for (const tc of toolCalls) {
+                outputTokens += this.countTextTokens(JSON.stringify(tc.input || {}));
             }
+            let totalTokens = inputTokens + outputTokens;
             
             yield {
                 type: "message_delta",
