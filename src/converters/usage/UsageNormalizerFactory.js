@@ -39,6 +39,7 @@ function generateStableCacheKey(protocol, options) {
  */
 export class UsageNormalizerFactory {
     static #normalizers = new Map();
+    static #tokenDistributions = new Map();
     static #kiroRatios = { ...DEFAULT_KIRO_RATIOS };
     static #kiroThreshold = DEFAULT_THRESHOLD;
 
@@ -129,7 +130,7 @@ export class UsageNormalizerFactory {
     }
 
     /**
-     * 获取 Token 分配策略
+     * 获取 Token 分配策略（带缓存）
      * @param {string|Object} config - 策略配置
      *   - 'kiro': 使用当前配置的 Kiro 比例（可通过 configureKiroRatios 修改）
      *   - 'passthrough': 不进行分配
@@ -137,6 +138,24 @@ export class UsageNormalizerFactory {
      * @returns {TokenDistributionStrategy}
      */
     static getTokenDistribution(config) {
+        const cacheKey = typeof config === 'string'
+            ? config
+            : JSON.stringify(config);
+
+        if (!this.#tokenDistributions.has(cacheKey)) {
+            const distribution = this.createTokenDistribution(config);
+            this.#tokenDistributions.set(cacheKey, distribution);
+        }
+
+        return this.#tokenDistributions.get(cacheKey);
+    }
+
+    /**
+     * 创建 Token 分配策略（不缓存）
+     * @param {string|Object} config - 策略配置
+     * @returns {TokenDistributionStrategy}
+     */
+    static createTokenDistribution(config) {
         if (typeof config === 'string') {
             switch (config) {
                 case 'kiro':
@@ -159,5 +178,6 @@ export class UsageNormalizerFactory {
      */
     static clearCache() {
         this.#normalizers.clear();
+        this.#tokenDistributions.clear();
     }
 }

@@ -1702,10 +1702,10 @@ async initializeAuth(forceRefresh = false) {
                     role: "assistant",
                     model: model,
                     usage: {
-                        input_tokens: estimatedInputTokens,
+                        input_tokens: splitInputTokens,
                         output_tokens: 0,
-                        cache_creation_input_tokens: 0,
-                        cache_read_input_tokens: 0
+                        cache_creation_input_tokens,
+                        cache_read_input_tokens
                     },
                     content: []
                 }
@@ -1946,15 +1946,18 @@ async initializeAuth(forceRefresh = false) {
                 inputTokens = estimatedInputTokens;
             }
 
+            // 重新计算 token 分配（基于实际 inputTokens）
+            const finalDistribution = calculateKiroTokenDistribution(inputTokens);
+
             // 4. 发送 message_delta 事件
             yield {
                 type: "message_delta",
                 delta: { stop_reason: toolCalls.length > 0 ? "tool_use" : "end_turn" },
                 usage: {
-                    input_tokens: inputTokens,
+                    input_tokens: finalDistribution.input_tokens,
                     output_tokens: outputTokens,
-                    cache_creation_input_tokens: 0,
-                    cache_read_input_tokens: 0
+                    cache_creation_input_tokens: finalDistribution.cache_creation_input_tokens,
+                    cache_read_input_tokens: finalDistribution.cache_read_input_tokens
                 }
             };
 
@@ -2054,8 +2057,10 @@ async initializeAuth(forceRefresh = false) {
                     role: role,
                     model: model,
                     usage: {
-                        input_tokens: inputTokens,
-                        output_tokens: 0 // Will be updated in message_delta
+                        input_tokens: splitInputTokens,
+                        output_tokens: 0, // Will be updated in message_delta
+                        cache_creation_input_tokens,
+                        cache_read_input_tokens
                     },
                     content: [] // Content will be streamed via content_block_delta
                 }
@@ -2205,8 +2210,10 @@ async initializeAuth(forceRefresh = false) {
                 stop_reason: stopReason,
                 stop_sequence: null,
                 usage: {
-                    input_tokens: inputTokens,
-                    output_tokens: outputTokens
+                    input_tokens: splitInputTokens,
+                    output_tokens: outputTokens,
+                    cache_creation_input_tokens,
+                    cache_read_input_tokens
                 },
                 content: contentArray
             };
