@@ -10,6 +10,7 @@ import { getProviderModels } from '../provider-models.js';
 import { countTokens } from '@anthropic-ai/tokenizer';
 import { configureAxiosProxy } from '../../utils/proxy-utils.js';
 import { isRetryableNetworkError } from '../../utils/common.js';
+import { calculateKiroTokenDistribution } from '../../converters/usage/index.js';
 
 const KIRO_CONSTANTS = {
     REFRESH_URL: 'https://prod.{{region}}.auth.desktop.kiro.dev/refreshToken',
@@ -1501,30 +1502,6 @@ async initializeAuth(forceRefresh = false) {
         }
     }
 
-    /**
-     * Calculate token distribution based on 1:2:25 ratio
-     */
-    calculateTokenDistribution(inputTokens) {
-        if (inputTokens < 100) {
-            return {
-                input_tokens: inputTokens,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0
-            };
-        }
-
-        const totalParts = 28; // 1 + 2 + 25
-        const inputPart = Math.floor(inputTokens * 1 / totalParts);
-        const creationPart = Math.floor(inputTokens * 2 / totalParts);
-        const readPart = inputTokens - inputPart - creationPart;
-
-        return {
-            input_tokens: inputPart,
-            cache_creation_input_tokens: creationPart,
-            cache_read_input_tokens: readPart
-        };
-    }
-
     // 真正的流式传输实现
     async * generateContentStream(model, requestBody) {
         if (!this.isInitialized) await this.initialize();
@@ -1537,9 +1514,9 @@ async initializeAuth(forceRefresh = false) {
         
         const finalModel = MODEL_MAPPING[model] ? model : this.modelName;
         console.log(`[Kiro] Calling generateContentStream with model: ${finalModel} (real streaming)`);
-        
+
         const inputTokens = this.estimateInputTokens(requestBody);
-        const { input_tokens: splitInputTokens, cache_creation_input_tokens, cache_read_input_tokens } = this.calculateTokenDistribution(inputTokens);
+        const { input_tokens: splitInputTokens, cache_creation_input_tokens, cache_read_input_tokens } = calculateKiroTokenDistribution(inputTokens);
         const messageId = `${uuidv4()}`;
         
         try {
@@ -1770,7 +1747,7 @@ async initializeAuth(forceRefresh = false) {
      */
     buildClaudeResponse(content, isStream = false, role = 'assistant', model, toolCalls = null, inputTokens = 0) {
         const messageId = `${uuidv4()}`;
-        const { input_tokens: splitInputTokens, cache_creation_input_tokens, cache_read_input_tokens } = this.calculateTokenDistribution(inputTokens);
+        const { input_tokens: splitInputTokens, cache_creation_input_tokens, cache_read_input_tokens } = calculateKiroTokenDistribution(inputTokens);
 
         if (isStream) {
             // Kiro API is "pseudo-streaming", so we'll send a few events to simulate
