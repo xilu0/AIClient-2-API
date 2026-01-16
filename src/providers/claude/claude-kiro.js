@@ -44,9 +44,9 @@ const KIRO_MODELS = getProviderModels('claude-kiro-oauth');
 
 // 完整的模型映射表
 const FULL_MODEL_MAPPING = {
-    "claude-opus-4-5":"claude-opus-4.5",
-    "claude-opus-4-5-20251101":"claude-opus-4.5",
-    "claude-haiku-4-5":"claude-haiku-4.5",
+    "claude-opus-4-5": "CLAUDE_OPUS_4_5_20251101_V1_0",
+    "claude-opus-4-5-20251101": "CLAUDE_OPUS_4_5_20251101_V1_0",
+    "claude-haiku-4-5": "CLAUDE_HAIKU_4_5_20251101_V1_0",
     "claude-sonnet-4-5": "CLAUDE_SONNET_4_5_20250929_V1_0",
     "claude-sonnet-4-5-20250929": "CLAUDE_SONNET_4_5_20250929_V1_0",
     "claude-sonnet-4-20250514": "CLAUDE_SONNET_4_20250514_V1_0",
@@ -2157,7 +2157,12 @@ async initializeAuth(forceRefresh = false) {
                     stop_reason: stopReason,
                     stop_sequence: null,
                 },
-                usage: { output_tokens: totalOutputTokens }
+                usage: {
+                    input_tokens: splitInputTokens,
+                    output_tokens: totalOutputTokens,
+                    cache_creation_input_tokens,
+                    cache_read_input_tokens
+                }
             });
 
             // 6. message_stop event
