@@ -11,6 +11,7 @@ import { getProviderModels } from '../provider-models.js';
 import { handleGeminiCliOAuth } from '../../auth/oauth-handlers.js';
 import { getProxyConfigForProvider, getGoogleAuthProxyConfig } from '../../utils/proxy-utils.js';
 import { normalizeGeminiUsage } from '../../converters/usage/index.js';
+import { CredentialCacheManager } from '../../utils/credential-cache-manager.js';
 
 // 配置 HTTP/HTTPS agent 限制连接池大小，避免资源泄漏
 const httpAgent = new http.Agent({
@@ -275,11 +276,25 @@ export class GeminiApiService {
             
             if (forceRefresh) {
                 console.log('[Gemini Auth] Forcing token refresh...');
-                const { credentials: newCredentials } = await this.authClient.refreshAccessToken();
-                this.authClient.setCredentials(newCredentials);
-                // Save refreshed credentials back to file
-                await fs.writeFile(credPath, JSON.stringify(newCredentials, null, 2));
-                console.log('[Gemini Auth] Token refreshed and saved successfully.');
+
+                // 使用去重锁：多个并发刷新请求只执行一次，共享结果
+                const dedupeKey = `gemini-token-refresh:${credPath}`;
+                const credentialCache = CredentialCacheManager.getInstance();
+                await credentialCache.withDeduplication(dedupeKey, async () => {
+                    const { credentials: newCredentials } = await this.authClient.refreshAccessToken();
+                    this.authClient.setCredentials(newCredentials);
+                    // Save refreshed credentials back to file (with file locking)
+                    await this._saveCredentialsToFile(credPath, newCredentials);
+                    console.log('[Gemini Auth] Token refreshed and saved successfully.');
+                });
+                
+                // 如果是等待其他请求完成的刷新，需要重新加载凭证
+                if (this.isExpiryDateNear()) {
+                    const refreshedData = await fs.readFile(credPath, "utf8");
+                    const refreshedCredentials = JSON.parse(refreshedData);
+                    this.authClient.setCredentials(refreshedCredentials);
+                    console.log('[Gemini Auth] Credentials reloaded after concurrent refresh');
+                }
             }
         } catch (error) {
             console.error('[Gemini Auth] Error initializing authentication:', error.code);
@@ -625,6 +640,33 @@ export class GeminiApiService {
     }
 
     /**
+     * 保存凭证到文件（使用内存缓存优先）
+     * @param {string} filePath - 凭证文件路径
+     * @param {Object} credentials - 凭证数据
+     */
+    async _saveCredentialsToFile(filePath, credentials) {
+        // 优先更新内存缓存
+        const credentialCache = CredentialCacheManager.getInstance();
+        const providerType = 'gemini-cli-oauth';
+
+        if (this.uuid && credentialCache.hasCredentials(providerType, this.uuid)) {
+            credentialCache.updateCredentials(providerType, this.uuid, credentials, filePath);
+            console.log(`[Gemini Auth] Credentials saved to memory cache: ${this.uuid}`);
+            return;
+        }
+
+        // 回退到使用内存锁写入文件
+        await credentialCache.withMemoryLock(`gemini-save:${filePath}`, async () => {
+            try {
+                await fs.writeFile(filePath, JSON.stringify(credentials, null, 2));
+                console.log(`[Gemini Auth] Credentials saved to ${filePath}`);
+            } catch (error) {
+                console.error(`[Gemini Auth] Failed to save credentials to ${filePath}: ${error.message}`);
+            }
+        });
+    }
+
+    /**
      * 获取模型配额信息
      * @returns {Promise<Object>} 模型配额信息
      */
@@ -662,7 +704,7 @@ export class GeminiApiService {
             try {
                 const quotaURL = `${this.codeAssistEndpoint}/${this.apiVersion}:retrieveUserQuota`;
                 const requestBody = {
-                    project: `projects/${this.projectId}`
+                    project: `${this.projectId}`
                 };
                 const requestOptions = {
                     url: quotaURL,

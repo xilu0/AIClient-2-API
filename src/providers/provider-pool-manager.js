@@ -2,6 +2,7 @@ import * as fs from 'fs'; // Import fs module
 import { getServiceAdapter } from './adapter.js';
 import { MODEL_PROVIDER, getProtocolPrefix } from '../utils/common.js';
 import { getProviderModels } from './provider-models.js';
+import { CredentialCacheManager } from '../utils/credential-cache-manager.js';
 import axios from 'axios';
 
 /**
@@ -43,6 +44,10 @@ export class ProviderPoolManager {
         // Model Fallback 映射配置
         this.modelFallbackMapping = options.globalConfig?.modelFallbackMapping || {};
 
+        // 并发控制：每个 providerType 的选择锁
+        // 用于确保 selectProvider 的排序和更新操作是原子的
+        this._selectionLocks = {};
+
         this.initializeProviderStatus();
     }
 
@@ -79,6 +84,7 @@ export class ProviderPoolManager {
         for (const providerType in this.providerPools) {
             this.providerStatus[providerType] = [];
             this.roundRobinIndex[providerType] = 0; // Initialize round-robin index for each type
+            this._selectionLocks[providerType] = Promise.resolve(); // 初始化选择锁
             this.providerPools[providerType].forEach((providerConfig) => {
                 // Ensure initial health and usage stats are present in the config
                 providerConfig.isHealthy = providerConfig.isHealthy !== undefined ? providerConfig.isHealthy : true;
@@ -111,18 +117,45 @@ export class ProviderPoolManager {
      * Selects a provider from the pool for a given provider type.
      * Currently uses a simple round-robin for healthy providers.
      * If requestedModel is provided, providers that don't support the model will be excluded.
+     *
+     * 注意：此方法现在返回 Promise，使用链式锁确保并发安全。
+     *
      * @param {string} providerType - The type of provider to select (e.g., 'gemini-cli', 'openai-custom').
      * @param {string} [requestedModel] - Optional. The model name to filter providers by.
-     * @returns {object|null} The selected provider's configuration, or null if no healthy provider is found.
+     * @returns {Promise<object|null>} The selected provider's configuration, or null if no healthy provider is found.
      */
     selectProvider(providerType, requestedModel = null, options = {}) {
         // 参数校验
         if (!providerType || typeof providerType !== 'string') {
             this._log('error', `Invalid providerType: ${providerType}`);
-            return null;
+            return Promise.resolve(null);
         }
 
+        // 使用链式锁确保同一 providerType 的选择操作串行执行
+        // 这样可以避免并发场景下多个请求选择到同一个 provider
+        const currentLock = this._selectionLocks[providerType] || Promise.resolve();
+        
+        const selectionPromise = currentLock.then(() => {
+            return this._doSelectProvider(providerType, requestedModel, options);
+        });
+        
+        // 更新锁，确保下一个请求等待当前请求完成
+        // 使用 catch 确保即使出错也不会阻塞后续请求
+        this._selectionLocks[providerType] = selectionPromise.catch(() => {});
+        
+        return selectionPromise;
+    }
+
+    /**
+     * 实际执行 provider 选择的内部方法（同步执行，由锁保护）
+     * @private
+     */
+    _doSelectProvider(providerType, requestedModel, options) {
         const availableProviders = this.providerStatus[providerType] || [];
+        
+        // 检查并恢复已到恢复时间的提供商
+        this._checkAndRecoverScheduledProviders(providerType);
+        
         let availableAndHealthyProviders = availableProviders.filter(p =>
             p.config.isHealthy && !p.config.isDisabled
         );
@@ -152,7 +185,7 @@ export class ProviderPoolManager {
             return null;
         }
 
-        // 改进：使用“最久未被使用”策略（LRU）代替取模轮询
+        // 改进：使用"最久未被使用"策略（LRU）代替取模轮询
         // 这样即使可用列表长度动态变化，也能确保每个账号被平均轮到
         const selected = availableAndHealthyProviders.sort((a, b) => {
             const timeA = a.config.lastUsed ? new Date(a.config.lastUsed).getTime() : 0;
@@ -162,16 +195,17 @@ export class ProviderPoolManager {
             // 如果时间相同，使用使用次数辅助判断
             return (a.config.usageCount || 0) - (b.config.usageCount || 0);
         })[0];
-        
-        // 更新使用信息（除非明确跳过）
-        if (!options.skipUsageCount) {
-            selected.config.lastUsed = new Date().toISOString();
-            selected.config.usageCount++;
-            // 使用防抖保存
-            this._debouncedSave(providerType);
-        }
 
-        this._log('debug', `Selected provider for ${providerType} (round-robin): ${selected.config.uuid}${requestedModel ? ` for model: ${requestedModel}` : ''}${options.skipUsageCount ? ' (skip usage count)' : ''}`);
+        // 始终更新 lastUsed（确保 LRU 策略生效，避免并发请求选到同一个 provider）
+        // usageCount 只在请求成功后才增加（由 skipUsageCount 控制）
+        selected.config.lastUsed = new Date().toISOString();
+        if (!options.skipUsageCount) {
+            selected.config.usageCount++;
+        }
+        // 使用防抖保存（文件 I/O 是异步的，但内存已经更新）
+        this._debouncedSave(providerType);
+
+        this._log('debug', `Selected provider for ${providerType} (LRU): ${selected.config.uuid}${requestedModel ? ` for model: ${requestedModel}` : ''}${options.skipUsageCount ? ' (skip usage count)' : ''}`);
         
         return selected.config;
     }
@@ -185,7 +219,19 @@ export class ProviderPoolManager {
      * @param {boolean} [options.skipUsageCount] - Optional. If true, skip incrementing usage count.
      * @returns {object|null} An object containing the selected provider's configuration and the actual provider type used, or null if no healthy provider is found.
      */
-    selectProviderWithFallback(providerType, requestedModel = null, options = {}) {
+    /**
+     * Selects a provider from the pool with fallback support.
+     * When the primary provider type has no healthy providers, it will try fallback types.
+     *
+     * 注意：此方法现在返回 Promise，因为内部调用的 selectProvider 是异步的。
+     *
+     * @param {string} providerType - The primary type of provider to select.
+     * @param {string} [requestedModel] - Optional. The model name to filter providers by.
+     * @param {Object} [options] - Optional. Additional options.
+     * @param {boolean} [options.skipUsageCount] - Optional. If true, skip incrementing usage count.
+     * @returns {Promise<object|null>} An object containing the selected provider's configuration and the actual provider type used, or null if no healthy provider is found.
+     */
+    async selectProviderWithFallback(providerType, requestedModel = null, options = {}) {
         // 参数校验
         if (!providerType || typeof providerType !== 'string') {
             this._log('error', `Invalid providerType: ${providerType}`);
@@ -237,8 +283,8 @@ export class ProviderPoolManager {
                 }
             }
 
-            // 尝试从当前类型选择提供商
-            const selectedConfig = this.selectProvider(currentType, requestedModel, options);
+            // 尝试从当前类型选择提供商（现在是异步的）
+            const selectedConfig = await this.selectProvider(currentType, requestedModel, options);
             
             if (selectedConfig) {
                 if (currentType !== providerType) {
@@ -270,8 +316,8 @@ export class ProviderPoolManager {
                 
                 // 检查目标类型是否有配置的池
                 if (this.providerStatus[targetProviderType] && this.providerStatus[targetProviderType].length > 0) {
-                    // 尝试从目标类型选择提供商（使用转换后的模型名）
-                    const selectedConfig = this.selectProvider(targetProviderType, targetModel, options);
+                    // 尝试从目标类型选择提供商（使用转换后的模型名，现在是异步的）
+                    const selectedConfig = await this.selectProvider(targetProviderType, targetModel, options);
                     
                     if (selectedConfig) {
                         this._log('info', `Fallback activated (Model Mapping): ${providerType} (${requestedModel}) -> ${targetProviderType} (${targetModel}) (uuid: ${selectedConfig.uuid})`);
@@ -299,7 +345,7 @@ export class ProviderPoolManager {
                              const supportedModels = getProviderModels(fallbackType);
                              if (supportedModels.length > 0 && !supportedModels.includes(targetModel)) continue;
                              
-                             const fallbackSelectedConfig = this.selectProvider(fallbackType, targetModel, options);
+                             const fallbackSelectedConfig = await this.selectProvider(fallbackType, targetModel, options);
                              if (fallbackSelectedConfig) {
                                  this._log('info', `Fallback activated (Model Mapping -> Chain): ${providerType} (${requestedModel}) -> ${targetProviderType} -> ${fallbackType} (${targetModel}) (uuid: ${fallbackSelectedConfig.uuid})`);
                                  return {
@@ -430,6 +476,73 @@ export class ProviderPoolManager {
     }
 
     /**
+     * Marks a provider as unhealthy immediately (without accumulating error count).
+     * Used for definitive authentication errors like 401/403.
+     * @param {string} providerType - The type of the provider.
+     * @param {object} providerConfig - The configuration of the provider to mark.
+     * @param {string} [errorMessage] - Optional error message to store.
+     */
+    markProviderUnhealthyImmediately(providerType, providerConfig, errorMessage = null) {
+        if (!providerConfig?.uuid) {
+            this._log('error', 'Invalid providerConfig in markProviderUnhealthyImmediately');
+            return;
+        }
+
+        const provider = this._findProvider(providerType, providerConfig.uuid);
+        if (provider) {
+            provider.config.isHealthy = false;
+            provider.config.errorCount = this.maxErrorCount; // Set to max to indicate definitive failure
+            provider.config.lastErrorTime = new Date().toISOString();
+            provider.config.lastUsed = new Date().toISOString();
+
+            if (errorMessage) {
+                provider.config.lastErrorMessage = errorMessage;
+            }
+
+            this._log('warn', `Immediately marked provider as unhealthy: ${providerConfig.uuid} for type ${providerType}. Reason: ${errorMessage || 'Authentication error'}`);
+            this._debouncedSave(providerType);
+        }
+    }
+
+    /**
+     * Marks a provider as unhealthy with a scheduled recovery time.
+     * Used for quota exhaustion errors (402) where the quota will reset at a specific time.
+     * @param {string} providerType - The type of the provider.
+     * @param {object} providerConfig - The configuration of the provider to mark.
+     * @param {string} [errorMessage] - Optional error message to store.
+     * @param {Date|string} [recoveryTime] - Optional recovery time when the provider should be marked healthy again.
+     */
+    markProviderUnhealthyWithRecoveryTime(providerType, providerConfig, errorMessage = null, recoveryTime = null) {
+        if (!providerConfig?.uuid) {
+            this._log('error', 'Invalid providerConfig in markProviderUnhealthyWithRecoveryTime');
+            return;
+        }
+
+        const provider = this._findProvider(providerType, providerConfig.uuid);
+        if (provider) {
+            provider.config.isHealthy = false;
+            provider.config.errorCount = this.maxErrorCount; // Set to max to indicate definitive failure
+            provider.config.lastErrorTime = new Date().toISOString();
+            provider.config.lastUsed = new Date().toISOString();
+
+            if (errorMessage) {
+                provider.config.lastErrorMessage = errorMessage;
+            }
+
+            // Set recovery time if provided
+            if (recoveryTime) {
+                const recoveryDate = recoveryTime instanceof Date ? recoveryTime : new Date(recoveryTime);
+                provider.config.scheduledRecoveryTime = recoveryDate.toISOString();
+                this._log('warn', `Marked provider as unhealthy with recovery time: ${providerConfig.uuid} for type ${providerType}. Recovery at: ${recoveryDate.toISOString()}. Reason: ${errorMessage || 'Quota exhausted'}`);
+            } else {
+                this._log('warn', `Marked provider as unhealthy: ${providerConfig.uuid} for type ${providerType}. Reason: ${errorMessage || 'Quota exhausted'}`);
+            }
+
+            this._debouncedSave(providerType);
+        }
+    }
+
+    /**
      * Marks a provider as healthy.
      * @param {string} providerType - The type of the provider.
      * @param {object} providerConfig - The configuration of the provider to mark.
@@ -528,6 +641,87 @@ export class ProviderPoolManager {
     }
 
     /**
+     * 刷新指定提供商的 UUID
+     * 用于在认证错误（如 401）时更换 UUID，以便重新尝试
+     * @param {string} providerType - 提供商类型
+     * @param {object} providerConfig - 提供商配置（包含当前 uuid）
+     * @returns {string|null} 新的 UUID，如果失败则返回 null
+     */
+    refreshProviderUuid(providerType, providerConfig) {
+        if (!providerConfig?.uuid) {
+            this._log('error', 'Invalid providerConfig in refreshProviderUuid');
+            return null;
+        }
+
+        const provider = this._findProvider(providerType, providerConfig.uuid);
+        if (provider) {
+            const oldUuid = provider.config.uuid;
+            // 生成新的 UUID
+            const newUuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+                const r = Math.random() * 16 | 0;
+                const v = c === 'x' ? r : (r & 0x3 | 0x8);
+                return v.toString(16);
+            });
+            
+            // 更新 provider 的 UUID
+            provider.uuid = newUuid;
+            provider.config.uuid = newUuid;
+            
+            // 同时更新 providerPools 中的原始数据
+            const poolArray = this.providerPools[providerType];
+            if (poolArray) {
+                const originalProvider = poolArray.find(p => p.uuid === oldUuid);
+                if (originalProvider) {
+                    originalProvider.uuid = newUuid;
+                }
+            }
+            
+            this._log('info', `Refreshed provider UUID: ${oldUuid} -> ${newUuid} for type ${providerType}`);
+            this._debouncedSave(providerType);
+            
+            return newUuid;
+        }
+        
+        this._log('warn', `Provider not found for UUID refresh: ${providerConfig.uuid} in ${providerType}`);
+        return null;
+    }
+
+    /**
+     * 检查并恢复已到恢复时间的提供商
+     * @param {string} [providerType] - 可选，指定要检查的提供商类型。如果不提供，检查所有类型
+     * @private
+     */
+    _checkAndRecoverScheduledProviders(providerType = null) {
+        const now = new Date();
+        const typesToCheck = providerType ? [providerType] : Object.keys(this.providerStatus);
+        
+        for (const type of typesToCheck) {
+            const providers = this.providerStatus[type] || [];
+            for (const providerStatus of providers) {
+                const config = providerStatus.config;
+                
+                // 检查是否有 scheduledRecoveryTime 且已到恢复时间
+                if (config.scheduledRecoveryTime && !config.isHealthy) {
+                    const recoveryTime = new Date(config.scheduledRecoveryTime);
+                    if (now >= recoveryTime) {
+                        this._log('info', `Auto-recovering provider ${config.uuid} (${type}). Scheduled recovery time reached: ${recoveryTime.toISOString()}`);
+                        
+                        // 恢复健康状态
+                        config.isHealthy = true;
+                        config.errorCount = 0;
+                        config.lastErrorTime = null;
+                        config.lastErrorMessage = null;
+                        config.scheduledRecoveryTime = null; // 清除恢复时间
+                        
+                        // 保存更改
+                        this._debouncedSave(type);
+                    }
+                }
+            }
+        }
+    }
+
+    /**
      * Performs health checks on all providers in the pool.
      * This method would typically be called periodically (e.g., via cron job).
      */
@@ -535,9 +729,21 @@ export class ProviderPoolManager {
         this._log('info', 'Performing health checks on all providers...');
         const now = new Date();
         
+        // 首先检查并恢复已到恢复时间的提供商
+        this._checkAndRecoverScheduledProviders();
+        
         for (const providerType in this.providerStatus) {
             for (const providerStatus of this.providerStatus[providerType]) {
                 const providerConfig = providerStatus.config;
+
+                // 如果提供商有 scheduledRecoveryTime 且未到恢复时间，跳过健康检查
+                if (providerConfig.scheduledRecoveryTime && !providerConfig.isHealthy) {
+                    const recoveryTime = new Date(providerConfig.scheduledRecoveryTime);
+                    if (now < recoveryTime) {
+                        this._log('debug', `Skipping health check for ${providerConfig.uuid} (${providerType}). Waiting for scheduled recovery at ${recoveryTime.toISOString()}`);
+                        continue;
+                    }
+                }
 
                 // Only attempt to health check unhealthy providers after a certain interval
                 if (!providerStatus.config.isHealthy && providerStatus.config.lastErrorTime &&
@@ -609,20 +815,11 @@ export class ProviderPoolManager {
             return requests;
         }
         
-        // Kiro OAuth 同时支持 messages 和 contents 格式
+        // Kiro OAuth 只支持 messages 格式
         if (providerType.startsWith('claude-kiro')) {
-            // 优先使用 messages 格式
             requests.push({
                 messages: [baseMessage],
                 model: modelName,
-                max_tokens: 1
-            });
-            // 备用 contents 格式
-            requests.push({
-                contents: [{
-                    role: 'user',
-                    parts: [{ text: baseMessage.content }]
-                }],
                 max_tokens: 1
             });
             return requests;
@@ -657,7 +854,7 @@ export class ProviderPoolManager {
         // 确定健康检查使用的模型名称
         const modelName = providerConfig.checkModelName ||
                         ProviderPoolManager.DEFAULT_HEALTH_CHECK_MODELS[providerType];
-        
+
         // 如果未启用健康检查且不是强制检查，返回 null
         if (!providerConfig.checkHealth && !forceCheck) {
             return null;
@@ -668,13 +865,48 @@ export class ProviderPoolManager {
             return { success: false, modelName: null, errorMessage: 'Unknown provider type for health check' };
         }
 
-        // 使用内部服务适配器方式进行健康检查
+        // ========== 快速预检：从内存缓存检查 OAuth 凭证状态 ==========
+        // 对于 OAuth 类型的 provider，先检查 token 是否过期，避免阻塞
+        const oauthProviderTypes = ['claude-kiro-oauth', 'gemini-cli-oauth', 'gemini-antigravity', 'openai-qwen-oauth', 'openai-iflow-oauth', 'claude-orchids-oauth'];
+        if (oauthProviderTypes.includes(providerType) && providerConfig.uuid) {
+            const credentialCache = CredentialCacheManager.getInstance();
+            const cachedEntry = credentialCache.getCredentials(providerType, providerConfig.uuid);
+
+            if (cachedEntry && cachedEntry.credentials) {
+                const { expiresAt, accessToken } = cachedEntry.credentials;
+
+                // 检查 token 是否存在
+                if (!accessToken) {
+                    this._log('warn', `Health check fast-fail for ${providerConfig.uuid}: No access token in cache`);
+                    return { success: false, modelName, errorMessage: 'No access token available' };
+                }
+
+                // 检查 token 是否已过期（30秒缓冲）
+                if (expiresAt) {
+                    const expirationTime = new Date(expiresAt).getTime();
+                    const now = Date.now();
+                    const bufferMs = 30 * 1000;
+
+                    if (expirationTime <= now + bufferMs) {
+                        this._log('warn', `Health check fast-fail for ${providerConfig.uuid}: Token expired`);
+                        return { success: false, modelName, errorMessage: 'Token expired' };
+                    }
+                }
+
+                this._log('debug', `Health check pre-check passed for ${providerConfig.uuid}: Token valid in cache`);
+            }
+            // 注意：如果缓存中没有凭证，不要直接返回失败
+            // 让后续的实际健康检查去尝试初始化和加载凭证
+            // 这样可以支持刚重置健康状态或新添加的 provider
+        }
+
+        // ========== 实际 API 健康检查（带超时保护）==========
         const proxyKeys = ['GEMINI', 'OPENAI', 'CLAUDE', 'QWEN', 'KIRO'];
         const tempConfig = {
             ...providerConfig,
             MODEL_PROVIDER: providerType
         };
-        
+
         proxyKeys.forEach(key => {
             const proxyKey = `USE_SYSTEM_PROXY_${key}`;
             if (this.globalConfig[proxyKey] !== undefined) {
@@ -683,19 +915,32 @@ export class ProviderPoolManager {
         });
 
         const serviceAdapter = getServiceAdapter(tempConfig);
-        
+
         // 获取所有可能的请求格式
         const healthCheckRequests = this._buildHealthCheckRequests(providerType, modelName);
-        
+
+        // 健康检查超时时间（15秒，避免长时间阻塞）
+        const healthCheckTimeout = 15000;
+
         // 重试机制：尝试不同的请求格式
         const maxRetries = healthCheckRequests.length;
         let lastError = null;
-        
+
         for (let i = 0; i < maxRetries; i++) {
             const healthCheckRequest = healthCheckRequests[i];
             try {
                 this._log('debug', `Health check attempt ${i + 1}/${maxRetries} for ${modelName}: ${JSON.stringify(healthCheckRequest)}`);
-                await serviceAdapter.generateContent(modelName, healthCheckRequest);
+
+                // 带超时的健康检查
+                const timeoutPromise = new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('Health check timeout')), healthCheckTimeout)
+                );
+
+                await Promise.race([
+                    serviceAdapter.generateContent(modelName, healthCheckRequest),
+                    timeoutPromise
+                ]);
+
                 return { success: true, modelName, errorMessage: null };
             } catch (error) {
                 lastError = error;
@@ -703,7 +948,7 @@ export class ProviderPoolManager {
                 // 继续尝试下一个格式
             }
         }
-        
+
         // 所有尝试都失败
         this._log('error', `Health check failed for ${providerType} after ${maxRetries} attempts: ${lastError?.message}`);
         return { success: false, modelName, errorMessage: lastError?.message || 'All health check attempts failed' };
