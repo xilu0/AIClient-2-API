@@ -849,6 +849,18 @@ function detectProviderFromPath(filePath) {
             providerType: 'claude-orchids-oauth',
             displayName: 'Orchids OAuth',
             shortName: 'orchids-oauth'
+        },
+        {
+            patterns: ['configs/codex/', '/codex/'],
+            providerType: 'openai-codex-oauth',
+            displayName: 'OpenAI Codex OAuth',
+            shortName: 'codex-oauth'
+        },
+        {
+            patterns: ['configs/iflow/', '/iflow/'],
+            providerType: 'openai-iflow-oauth',
+            displayName: 'OpenAI iFlow OAuth',
+            shortName: 'iflow-oauth'
         }
     ];
 
