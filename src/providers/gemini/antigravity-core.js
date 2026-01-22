@@ -15,7 +15,6 @@ import { handleGeminiAntigravityOAuth } from '../../auth/oauth-handlers.js';
 import { getProxyConfigForProvider, getGoogleAuthProxyConfig } from '../../utils/proxy-utils.js';
 import { cleanJsonSchemaProperties } from '../../converters/utils.js';
 import { normalizeGeminiUsage, UsageNormalizerFactory } from '../../converters/usage/index.js';
-import { CredentialCacheManager } from '../../utils/credential-cache-manager.js';
 import { getProviderPoolManager } from '../../services/service-manager.js';
 import { MODEL_PROVIDER } from '../../utils/common.js';
 
