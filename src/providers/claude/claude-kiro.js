@@ -2097,7 +2097,17 @@ async saveCredentialsToFile(filePath, newData) {
                     streamState.buffer += event.content;
                     const events = [];
 
+                    let loopCount = 0;
+                    const maxLoops = 1000;
                     while (streamState.buffer.length > 0) {
+                        if (++loopCount > maxLoops) {
+                            console.warn('[Kiro] Breaking infinite loop, remaining buffer:', streamState.buffer.length);
+                            const rest = streamState.buffer;
+                            streamState.buffer = '';
+                            if (rest) events.push(...createTextDeltaEvents(rest));
+                            break;
+                        }
+
                         if (!streamState.inThinking && !streamState.thinkingExtracted) {
                             const startPos = findRealTag(streamState.buffer, KIRO_THINKING.START_TAG);
                             if (startPos !== -1) {
@@ -2114,6 +2124,9 @@ async saveCredentialsToFile(filePath, newData) {
                                 const safeText = streamState.buffer.slice(0, safeLen);
                                 if (safeText) events.push(...createTextDeltaEvents(safeText));
                                 streamState.buffer = streamState.buffer.slice(safeLen);
+                            } else {
+                                // 防止无限循环：buffer太短时直接break
+                                break;
                             }
                             break;
                         }
