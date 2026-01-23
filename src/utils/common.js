@@ -118,26 +118,54 @@ export function formatExpiryTime(expiryTimestamp) {
 
 /**
  * Reads the entire request body from an HTTP request.
+ * 优化版本：使用数组存储chunks，避免字符串拼接导致的内存碎片
+ * 使用 setImmediate 避免阻塞事件循环
  * @param {http.IncomingMessage} req - The HTTP request object.
+ * @param {number} maxSize - Maximum request body size in bytes (default: 10MB)
  * @returns {Promise<Object>} A promise that resolves with the parsed JSON request body.
- * @throws {Error} If the request body is not valid JSON.
+ * @throws {Error} If the request body is not valid JSON or exceeds size limit.
  */
-export function getRequestBody(req) {
+export function getRequestBody(req, maxSize = 10 * 1024 * 1024) {
     return new Promise((resolve, reject) => {
-        let body = '';
+        const chunks = [];
+        let totalSize = 0;
+
         req.on('data', chunk => {
-            body += chunk.toString();
+            totalSize += chunk.length;
+
+            // 检查大小限制，防止内存溢出
+            if (totalSize > maxSize) {
+                req.destroy();
+                reject(new Error(`Request body too large (max: ${maxSize} bytes ${totalSize} bytes)`));
+                return;
+            }
+
+            chunks.push(chunk);
         });
+
         req.on('end', () => {
-            if (!body) {
+            if (chunks.length === 0) {
                 return resolve({});
             }
+
             try {
-                resolve(JSON.parse(body));
+                // 使用 Buffer.concat 而不是字符串拼接，避免内存碎片
+                const body = Buffer.concat(chunks).toString('utf8');
+
+                // 使用 setImmediate 将 JSON 解析放到下一个事件循环
+                // 避免阻塞当前事件循环，提升并发性能
+                setImmediate(() => {
+                    try {
+                        resolve(JSON.parse(body));
+                    } catch (error) {
+                        reject(new Error("Invalid JSON in request body: " + error.message));
+                    }
+                });
             } catch (error) {
-                reject(new Error("Invalid JSON in request body."));
+                reject(error);
             }
         });
+
         req.on('error', err => {
             reject(err);
         });
@@ -224,8 +252,8 @@ export async function handleUnifiedResponse(res, responsePayload, isStream) {
     }
 }
 
-export async function handleStreamRequest(res, service, model, requestBody, fromProvider, toProvider, PROMPT_LOG_MODE, PROMPT_LOG_FILENAME, providerPoolManager, pooluuid, customName, retryContext = null) {
-    let fullResponseText = '';
+export async function handleStreamRequest(res, service, model, requestBody, fromProvider, toProvider, PROMPT_LOG_MODE, PROMPT_LOG_FILENAME, providerPoolManager, pooluuid, customName) {
+    const textChunks = [];  // 使用数组存储文本，避免字符串拼接
     let fullResponseJson = '';
     let fullOldResponseJson = '';
     let responseClosed = false;
@@ -251,11 +279,12 @@ export async function handleStreamRequest(res, service, model, requestBody, from
     const openStop = getProtocolPrefix(fromProvider) === MODEL_PROTOCOL_PREFIX.OPENAI ;
 
     try {
+        let chunkCount = 0;
         for await (const nativeChunk of nativeStream) {
             // Extract text for logging purposes
             const chunkText = extractResponseText(nativeChunk, toProvider);
             if (chunkText && !Array.isArray(chunkText)) {
-                fullResponseText += chunkText;
+                textChunks.push(chunkText);  // 使用数组存储，避免字符串拼接
             }
 
             // Convert the complete chunk object to the client's format (fromProvider), if necessary.
@@ -278,10 +307,18 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                     // console.log(`event: ${chunk.type}\n`);
                 }
 
-                // fullOldResponseJson += JSON.stringify(chunk)+"\n";
-                // fullResponseJson += JSON.stringify(chunk)+"\n\n";
-                res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-                // console.log(`data: ${JSON.stringify(chunk)}\n`);
+                // 预先序列化，避免在循环中重复序列化相同的对象
+                const serialized = JSON.stringify(chunk);
+                // fullOldResponseJson += serialized+"\n";
+                // fullResponseJson += serialized+"\n\n";
+                res.write(`data: ${serialized}\n\n`);
+                // console.log(`data: ${serialized}\n`);
+            }
+
+            // 每处理10个chunk让出一次CPU，避免长时间阻塞事件循环
+            chunkCount++;
+            if (chunkCount % 10 === 0) {
+                await new Promise(resolve => setImmediate(resolve));
             }
         }
         if (openStop && needsConversion) {
@@ -405,6 +442,8 @@ export async function handleStreamRequest(res, service, model, requestBody, from
         if (!responseClosed) {
             res.end();
         }
+        // 最后拼接所有文本块，避免在循环中频繁拼接
+        const fullResponseText = textChunks.join('');
         await logConversation('output', fullResponseText, PROMPT_LOG_MODE, PROMPT_LOG_FILENAME);
         // fs.writeFile('oldResponseChunk'+Date.now()+'.json', fullOldResponseJson);
         // fs.writeFile('responseChunk'+Date.now()+'.json', fullResponseJson);

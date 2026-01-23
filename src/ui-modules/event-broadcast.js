@@ -58,6 +58,7 @@ export async function handleEvents(req, res) {
 
 /**
  * Initialize UI management features
+ * 优化版本：添加日志采样和批量广播，减��CPU占用
  */
 export function initializeUIManagement() {
     // Initialize log broadcasting for UI
@@ -67,59 +68,113 @@ export function initializeUIManagement() {
     if (!global.logBuffer) {
         global.logBuffer = [];
     }
+    if (!global.logBroadcastPending) {
+        global.logBroadcastPending = false;
+    }
+    if (!global.pendingLogs) {
+        global.pendingLogs = [];
+    }
+
+    // 日志采样率（可通过环境变量配置）
+    const LOG_SAMPLE_RATE = parseFloat(process.env.LOG_SAMPLE_RATE || '1.0');
+    const BATCH_BROADCAST_DELAY = parseInt(process.env.LOG_BATCH_DELAY || '100'); // 100ms批量广播
+
+    /**
+     * 批量广播日志，减少广播频率
+     */
+    function scheduleBatchBroadcast() {
+        if (global.logBroadcastPending) {
+            return;
+        }
+
+        global.logBroadcastPending = true;
+        setTimeout(() => {
+            if (global.pendingLogs.length > 0) {
+                // 批量广播最近的日志
+                const logsToSend = global.pendingLogs.slice(-10);
+                broadcastEvent('log_batch', logsToSend);
+                global.pendingLogs = [];
+            }
+            global.logBroadcastPending = false;
+        }, BATCH_BROADCAST_DELAY);
+    }
 
     // Override console.log to broadcast logs
     const originalLog = console.log;
     console.log = function(...args) {
         originalLog.apply(console, args);
-        const message = args.map(arg => {
-            if (typeof arg === 'string') return arg;
-            try {
-                return JSON.stringify(arg);
-            } catch (e) {
-                if (arg instanceof Error) {
-                    return `[Error: ${arg.message}] ${arg.stack || ''}`;
-                }
-                return `[Object: ${Object.prototype.toString.call(arg)}] (Circular or too complex to stringify)`;
-            }
-        }).join(' ');
-        const logEntry = {
-            timestamp: new Date().toISOString(),
-            level: 'info',
-            message: message
-        };
-        global.logBuffer.push(logEntry);
-        if (global.logBuffer.length > 100) {
-            global.logBuffer.shift();
+
+        // 日志采样：只处理部分日志
+        if (Math.random() > LOG_SAMPLE_RATE) {
+            return;
         }
-        broadcastEvent('log', logEntry);
+
+        // 使用 setImmediate 异步处理日志，避免阻塞主线程
+        setImmediate(() => {
+            const message = args.map(arg => {
+                if (typeof arg === 'string') return arg;
+                try {
+                    return JSON.stringify(arg);
+                } catch (e) {
+                    if (arg instanceof Error) {
+                        return `[Error: ${arg.message}]`;
+                    }
+                    return '[Complex Object]';
+                }
+            }).join(' ');
+
+            const logEntry = {
+                timestamp: new Date().toISOString(),
+                level: 'info',
+                message: message
+            };
+
+            global.logBuffer.push(logEntry);
+            if (global.logBuffer.length > 100) {
+                global.logBuffer.shift();
+            }
+
+            // 添加到待广播队列
+            global.pendingLogs.push(logEntry);
+
+            // 调度批量广播
+            scheduleBatchBroadcast();
+        });
     };
 
     // Override console.error to broadcast errors
     const originalError = console.error;
     console.error = function(...args) {
         originalError.apply(console, args);
-        const message = args.map(arg => {
-            if (typeof arg === 'string') return arg;
-            try {
-                return JSON.stringify(arg);
-            } catch (e) {
-                if (arg instanceof Error) {
-                    return `[Error: ${arg.message}] ${arg.stack || ''}`;
+
+        // 错误日志始终记录，不采样
+        setImmediate(() => {
+            const message = args.map(arg => {
+                if (typeof arg === 'string') return arg;
+                try {
+                    return JSON.stringify(arg);
+                } catch (e) {
+                    if (arg instanceof Error) {
+                        return `[Error: ${arg.message}] ${arg.stack || ''}`;
+                    }
+                    return '[Complex Object]';
                 }
-                return `[Object: ${Object.prototype.toString.call(arg)}] (Circular or too complex to stringify)`;
+            }).join(' ');
+
+            const logEntry = {
+                timestamp: new Date().toISOString(),
+                level: 'error',
+                message: message
+            };
+
+            global.logBuffer.push(logEntry);
+            if (global.logBuffer.length > 100) {
+                global.logBuffer.shift();
             }
-        }).join(' ');
-        const logEntry = {
-            timestamp: new Date().toISOString(),
-            level: 'error',
-            message: message
-        };
-        global.logBuffer.push(logEntry);
-        if (global.logBuffer.length > 100) {
-            global.logBuffer.shift();
-        }
-        broadcastEvent('log', logEntry);
+
+            // 错误日志立即广播
+            broadcastEvent('log', logEntry);
+        });
     };
 }
 
