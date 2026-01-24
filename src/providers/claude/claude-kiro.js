@@ -10,6 +10,7 @@ import { getProviderModels } from '../provider-models.js';
 import { countTokens } from '@anthropic-ai/tokenizer';
 import { configureAxiosProxy } from '../../utils/proxy-utils.js';
 import { isRetryableNetworkError, MODEL_PROVIDER, formatExpiryLog } from '../../utils/common.js';
+import { calculateKiroTokenDistribution } from '../../converters/usage/index.js';
 import { getProviderPoolManager } from '../../services/service-manager.js';
 
 const KIRO_THINKING = {
