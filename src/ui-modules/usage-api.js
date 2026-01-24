@@ -95,14 +95,20 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
         } else if (!adapter) {
             // Service instance not initialized, try auto-initialization
             try {
-                console.log(`[Usage API] Auto-initializing service adapter for ${providerType}: ${provider.uuid}`);
-                // Build configuration object
-                const serviceConfig = {
-                    ...CONFIG,
-                    ...provider,
-                    MODEL_PROVIDER: providerType
-                };
-                adapter = getServiceAdapter(serviceConfig);
+                // 限制并发初始化，避免CPU占用过高
+                if (result.totalCount > 4) {
+                    instanceResult.error = 'Too many providers, skipping auto-initialization to prevent CPU overload';
+                    result.errorCount++;
+                } else {
+                    console.log(`[Usage API] Auto-initializing service adapter for ${providerType}: ${provider.uuid}`);
+                    // Build configuration object
+                    const serviceConfig = {
+                        ...CONFIG,
+                        ...provider,
+                        MODEL_PROVIDER: providerType
+                    };
+                    adapter = getServiceAdapter(serviceConfig);
+                }
             } catch (initError) {
                 console.error(`[Usage API] Failed to initialize adapter for ${providerType}: ${provider.uuid}:`, initError.message);
                 instanceResult.error = `Service instance initialization failed: ${initError.message}`;
@@ -113,7 +119,13 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
         // If adapter exists (including just initialized), and no error, try to get usage
         if (adapter && !instanceResult.error) {
             try {
-                const usage = await getAdapterUsage(adapter, providerType);
+                // 添加超时控制，避免长时间等待
+                const usagePromise = getAdapterUsage(adapter, providerType);
+                const timeoutPromise = new Promise((_, reject) => 
+                    setTimeout(() => reject(new Error('Usage query timeout')), 10000)
+                );
+                
+                const usage = await Promise.race([usagePromise, timeoutPromise]);
                 instanceResult.success = true;
                 instanceResult.usage = usage;
                 result.successCount++;
