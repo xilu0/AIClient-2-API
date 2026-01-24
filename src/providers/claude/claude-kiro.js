@@ -1645,10 +1645,11 @@ async saveCredentialsToFile(filePath, newData) {
         const events = [];
         let remaining = buffer;
         let searchStart = 0;
-        let maxIterations = 500; // 增加最大迭代次数以处理大量流式数据
+        let maxIterations = 500; // 保留作为安全网
         let iterations = 0;
+        let foundEndMarker = false; // 添加结束标识检测
         
-        while (iterations < maxIterations) {
+        while (iterations < maxIterations && !foundEndMarker) {
             // 查找真正的 JSON payload 起始位置
             const contentStart = remaining.indexOf('{"content":', searchStart);
             const nameStart = remaining.indexOf('{"name":', searchStart);
@@ -1756,6 +1757,7 @@ async saveCredentialsToFile(filePath, newData) {
                             contextUsagePercentage: parsed.contextUsagePercentage
                         }
                     });
+                    foundEndMarker = true; // 检测到结束标识
                 }
             } catch (e) {
                 // JSON 解析失败，跳过这个位置继续搜索
@@ -1774,6 +1776,9 @@ async saveCredentialsToFile(filePath, newData) {
             console.warn(`[Kiro] Event stream parsing exceeded max iterations (${maxIterations}), buffer size: ${remaining.length}, processed events: ${events.length}`);
             // 当达到最大迭代次数时，清空buffer避免无限累积
             remaining = '';
+        } else if (foundEndMarker) {
+            // 检测到结束标识，正常结束解析
+            console.log(`[Kiro] Event stream parsing completed normally, processed ${events.length} events in ${iterations} iterations`);
         }
         
         // 如果 searchStart 有进展，截取剩余部分
