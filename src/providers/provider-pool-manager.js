@@ -62,7 +62,7 @@ export class ProviderPoolManager {
         // --- V2: 读写分离 and 异步刷新队列 ---
         // 刷新并发控制配置
         this.refreshConcurrency = {
-            global: options.globalConfig?.REFRESH_CONCURRENCY_GLOBAL ?? 2, // 全局最大并行提供商数
+            global: options.globalConfig?.REFRESH_CONCURRENCY_GLOBAL ?? 1, // 降低全局并发数
             perProvider: options.globalConfig?.REFRESH_CONCURRENCY_PER_PROVIDER ?? 1 // 每个提供商内部最大并行数
         };
         
