@@ -108,7 +108,10 @@ function isQuoteCharAt(text, index) {
 
 function findRealTag(text, tag, startIndex = 0) {
     let searchStart = Math.max(0, startIndex);
-    while (true) {
+    let maxIterations = 1000; // 防止无限循环
+    let iterations = 0;
+    
+    while (iterations < maxIterations) {
         const pos = text.indexOf(tag, searchStart);
         if (pos === -1) return -1;
         
@@ -119,7 +122,11 @@ function findRealTag(text, tag, startIndex = 0) {
         }
         
         searchStart = pos + 1;
+        iterations++;
     }
+    
+    console.warn(`[Kiro] findRealTag exceeded max iterations for tag: ${tag}`);
+    return -1;
 }
 
 /**
@@ -287,13 +294,21 @@ function parseBracketToolCalls(responseText) {
     const toolCalls = [];
     const callPositions = [];
     let start = 0;
-    while (true) {
+    let maxIterations = 100; // 防止无限循环
+    let iterations = 0;
+    
+    while (iterations < maxIterations) {
         const pos = responseText.indexOf("[Called", start);
         if (pos === -1) {
             break;
         }
         callPositions.push(pos);
         start = pos + 1;
+        iterations++;
+    }
+    
+    if (iterations >= maxIterations) {
+        console.warn('[Kiro] Tool call parsing exceeded max iterations');
     }
 
     for (let i = 0; i < callPositions.length; i++) {
@@ -1635,18 +1650,11 @@ async saveCredentialsToFile(filePath, newData) {
         const events = [];
         let remaining = buffer;
         let searchStart = 0;
+        let maxIterations = 50; // 防止无限循环
+        let iterations = 0;
         
-        while (true) {
+        while (iterations < maxIterations) {
             // 查找真正的 JSON payload 起始位置
-            // AWS Event Stream 包含二进制头部，我们只搜索有效的 JSON 模式
-            // Kiro 返回格式: {"content":"..."} 或 {"name":"xxx","toolUseId":"xxx",...} 或 {"followupPrompt":"..."}
-            
-            // 搜索所有可能的 JSON payload 开头模式
-            // Kiro 返回的 toolUse 可能分多个事件：
-            // 1. {"name":"xxx","toolUseId":"xxx"} - 开始
-            // 2. {"input":"..."} - input 数据（可能多次）
-            // 3. {"stop":true} - 结束
-            // 4. {"contextUsagePercentage":...} - 上下文使用百分比（最后一条消息）
             const contentStart = remaining.indexOf('{"content":', searchStart);
             const nameStart = remaining.indexOf('{"name":', searchStart);
             const followupStart = remaining.indexOf('{"followupPrompt":', searchStart);
@@ -1763,6 +1771,12 @@ async saveCredentialsToFile(filePath, newData) {
                 remaining = '';
                 break;
             }
+            
+            iterations++;
+        }
+        
+        if (iterations >= maxIterations) {
+            console.warn('[Kiro] Event stream parsing exceeded max iterations');
         }
         
         // 如果 searchStart 有进展，截取剩余部分
