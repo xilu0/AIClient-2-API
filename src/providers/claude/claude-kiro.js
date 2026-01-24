@@ -1796,153 +1796,129 @@ async saveCredentialsToFile(filePath, newData) {
         }
 
         const requestData = this.buildCodewhispererRequest(messages, model, body.tools, body.system, body.thinking);
-
         const token = this.accessToken;
         const headers = {
             'Authorization': `Bearer ${token}`,
             'amz-sdk-invocation-id': `${uuidv4()}`,
         };
-
         const requestUrl = model.startsWith('amazonq') ? this.amazonQUrl : this.baseUrl;
 
-        let stream = null;
-        try {
-            const response = await this.axiosInstance.post(requestUrl, requestData, { 
-                headers,
-                responseType: 'stream'
-            });
+        // 使用循环替代递归重试
+        let currentRetryCount = retryCount;
+        while (currentRetryCount <= maxRetries) {
+            let stream = null;
+            try {
+                const response = await this.axiosInstance.post(requestUrl, requestData, { 
+                    headers,
+                    responseType: 'stream'
+                });
 
-            stream = response.data;
-            let buffer = '';
-            let lastContentEvent = null;  // 用于检测连续重复的 content 事件
+                stream = response.data;
+                let buffer = '';
+                let lastContentEvent = null;
 
-            for await (const chunk of stream) {
-                buffer += chunk.toString();
-                
-                // 解析缓冲区中的事件
-                const { events, remaining } = this.parseAwsEventStreamBuffer(buffer);
-                buffer = remaining;
-                
-                // yield 所有事件，但过滤连续完全相同的 content 事件（Kiro API 有时会重复发送）
-                for (const event of events) {
-                    if (event.type === 'content' && event.data) {
-                        // 检查是否与上一个 content 事件完全相同
-                        if (lastContentEvent === event.data) {
-                            // 跳过重复的内容
-                            continue;
+                for await (const chunk of stream) {
+                    buffer += chunk.toString();
+                    
+                    const { events, remaining } = this.parseAwsEventStreamBuffer(buffer);
+                    buffer = remaining;
+                    
+                    for (const event of events) {
+                        if (event.type === 'content' && event.data) {
+                            if (lastContentEvent === event.data) {
+                                continue;
+                            }
+                            lastContentEvent = event.data;
+                            yield { type: 'content', content: event.data };
+                        } else if (event.type === 'toolUse') {
+                            yield { type: 'toolUse', toolUse: event.data };
+                        } else if (event.type === 'toolUseInput') {
+                            yield { type: 'toolUseInput', input: event.data.input };
+                        } else if (event.type === 'toolUseStop') {
+                            yield { type: 'toolUseStop', stop: event.data.stop };
+                        } else if (event.type === 'contextUsage') {
+                            yield { type: 'contextUsage', contextUsagePercentage: event.data.contextUsagePercentage };
                         }
-                        lastContentEvent = event.data;
-                        yield { type: 'content', content: event.data };
-                    } else if (event.type === 'toolUse') {
-                        yield { type: 'toolUse', toolUse: event.data };
-                    } else if (event.type === 'toolUseInput') {
-                        yield { type: 'toolUseInput', input: event.data.input };
-                    } else if (event.type === 'toolUseStop') {
-                        yield { type: 'toolUseStop', stop: event.data.stop };
-                    } else if (event.type === 'contextUsage') {
-                        yield { type: 'contextUsage', contextUsagePercentage: event.data.contextUsagePercentage };
                     }
                 }
-            }
-        } catch (error) {
-            // 确保出错时关闭流
-            if (stream && typeof stream.destroy === 'function') {
-                stream.destroy();
-            }
-            
-            const status = error.response?.status;
-            const errorCode = error.code;
-            const errorMessage = error.message || '';
-            
-            // 检查是否为可重试的网络错误
-            const isNetworkError = isRetryableNetworkError(error);
-            
-            // Handle 401 (Unauthorized) - try to refresh token first
-            if (status === 401 && !isRetry) {
-                console.log('[Kiro] Received 401 in stream. Triggering background refresh via PoolManager...');
-                
-                // 1. 先刷新 UUID
-                const newUuid = this._refreshUuid();
-                if (newUuid) {
-                    console.log(`[Kiro] UUID refreshed: ${this.uuid} -> ${newUuid}`);
-                    this.uuid = newUuid;
+                return; // 成功完成，退出循环
+            } catch (error) {
+                // 确保出错时关闭流
+                if (stream && typeof stream.destroy === 'function') {
+                    stream.destroy();
                 }
-                // 标记当前凭证为不健康（会自动进入刷新队列）
-                this._markCredentialNeedRefresh('401 Unauthorized in stream - Triggering auto-refresh');
-                // Mark error for credential switch without recording error count
-                error.shouldSwitchCredential = true;
-                error.skipErrorCount = true;
-                throw error;
-            }
-            
-            // Handle 402 (Payment Required / Quota Exceeded) - verify usage and mark as unhealthy with recovery time
-            if (status === 402) {
-                await this._handle402Error(error, 'stream');
-            }
-
-            // Handle 403 (Forbidden) - mark as unhealthy immediately, no retry
-            if (status === 403) {
-                console.log('[Kiro] Received 403 in stream. Marking credential as need refresh...');
                 
-                // 检查是否为 temporarily suspended 错误
-                const isSuspended = errorMessage && errorMessage.toLowerCase().includes('temporarily is suspended');
+                const status = error.response?.status;
+                const errorCode = error.code;
+                const errorMessage = error.message || '';
+                const isNetworkError = isRetryableNetworkError(error);
                 
-                if (isSuspended) {
-                    // temporarily suspended 错误：直接标记为不健康，不刷新 UUID
-                    console.log('[Kiro] Account temporarily suspended in stream. Marking as unhealthy without UUID refresh...');
-                    this._markCredentialUnhealthy('403 Forbidden - Account temporarily suspended', error);
-                } else {
-                    // 其他 403 错误：先刷新 UUID，然后标记需要刷新
+                // 非重试错误直接抛出
+                if (status === 401 && !isRetry) {
+                    console.log('[Kiro] Received 401 in stream. Triggering background refresh via PoolManager...');
                     const newUuid = this._refreshUuid();
                     if (newUuid) {
                         console.log(`[Kiro] UUID refreshed: ${this.uuid} -> ${newUuid}`);
                         this.uuid = newUuid;
                     }
-                    this._markCredentialNeedRefresh('403 Forbidden', error);
+                    this._markCredentialNeedRefresh('401 Unauthorized in stream - Triggering auto-refresh');
+                    error.shouldSwitchCredential = true;
+                    error.skipErrorCount = true;
+                    throw error;
+                }
+                
+                if (status === 402) {
+                    await this._handle402Error(error, 'stream');
                 }
 
-                // Mark error for credential switch without recording error count
-                error.shouldSwitchCredential = true;
-                error.skipErrorCount = true;
-                throw error;
-            }
-            
-            // Handle 429 (Too Many Requests) - wait baseDelay then switch credential
-            if (status === 429) {
-                console.log(`[Kiro] Received 429 (Too Many Requests) in stream. Waiting ${baseDelay}ms before switching credential...`);
-                await new Promise(resolve => setTimeout(resolve, baseDelay));
-                // Mark error for credential switch without recording error count
-                error.shouldSwitchCredential = true;
-                error.skipErrorCount = true;
-                throw error;
-            }
+                if (status === 403) {
+                    console.log('[Kiro] Received 403 in stream. Marking credential as need refresh...');
+                    const isSuspended = errorMessage && errorMessage.toLowerCase().includes('temporarily is suspended');
+                    
+                    if (isSuspended) {
+                        console.log('[Kiro] Account temporarily suspended in stream. Marking as unhealthy without UUID refresh...');
+                        this._markCredentialUnhealthy('403 Forbidden - Account temporarily suspended', error);
+                    } else {
+                        const newUuid = this._refreshUuid();
+                        if (newUuid) {
+                            console.log(`[Kiro] UUID refreshed: ${this.uuid} -> ${newUuid}`);
+                            this.uuid = newUuid;
+                        }
+                        this._markCredentialNeedRefresh('403 Forbidden', error);
+                    }
+                    error.shouldSwitchCredential = true;
+                    error.skipErrorCount = true;
+                    throw error;
+                }
+                
+                if (status === 429) {
+                    console.log(`[Kiro] Received 429 (Too Many Requests) in stream. Waiting ${baseDelay}ms before switching credential...`);
+                    await new Promise(resolve => setTimeout(resolve, baseDelay));
+                    error.shouldSwitchCredential = true;
+                    error.skipErrorCount = true;
+                    throw error;
+                }
 
-            // Handle 5xx server errors - wait baseDelay then switch credential
-            if (status >= 500 && status < 600) {
-                console.log(`[Kiro] Received ${status} server error in stream. Waiting ${baseDelay}ms before switching credential...`);
-                await new Promise(resolve => setTimeout(resolve, baseDelay));
-                // Mark error for credential switch without recording error count
-                error.shouldSwitchCredential = true;
-                error.skipErrorCount = true;
+                if (status >= 500 && status < 600) {
+                    console.log(`[Kiro] Received ${status} server error in stream. Waiting ${baseDelay}ms before switching credential...`);
+                    await new Promise(resolve => setTimeout(resolve, baseDelay));
+                    error.shouldSwitchCredential = true;
+                    error.skipErrorCount = true;
+                    throw error;
+                }
+
+                // 网络错误重试逻辑
+                if (isNetworkError && currentRetryCount < maxRetries) {
+                    const delay = baseDelay * Math.pow(2, currentRetryCount);
+                    const errorIdentifier = errorCode || errorMessage.substring(0, 50);
+                    console.log(`[Kiro] Network error (${errorIdentifier}) in stream. Retrying in ${delay}ms... (attempt ${currentRetryCount + 1}/${maxRetries})`);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    currentRetryCount++;
+                    continue; // 继续循环重试
+                }
+
+                console.error(`[Kiro] Stream API call failed (Status: ${status}, Code: ${errorCode}):`, error.message);
                 throw error;
-            }
-
-            // Handle network errors (ECONNRESET, ETIMEDOUT, etc.) with exponential backoff
-            if (isNetworkError && retryCount < maxRetries) {
-                const delay = baseDelay * Math.pow(2, retryCount);
-                const errorIdentifier = errorCode || errorMessage.substring(0, 50);
-                console.log(`[Kiro] Network error (${errorIdentifier}) in stream. Retrying in ${delay}ms... (attempt ${retryCount + 1}/${maxRetries})`);
-                await new Promise(resolve => setTimeout(resolve, delay));
-                yield* this.streamApiReal(method, model, body, isRetry, retryCount + 1);
-                return;
-            }
-
-            console.error(`[Kiro] Stream API call failed (Status: ${status}, Code: ${errorCode}):`, error.message);
-            throw error;
-        } finally {
-            // 确保流被关闭，释放资源
-            if (stream && typeof stream.destroy === 'function') {
-                stream.destroy();
             }
         }
     }
