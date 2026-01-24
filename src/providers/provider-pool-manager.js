@@ -117,7 +117,10 @@ export class ProviderPoolManager {
 
                 if (configPath && fs.existsSync(configPath)) {
                     try {
-                        if (true) {
+                        // 检查配置文件是否接近过期（这里应该有具体的过期检查逻辑）
+                        // 暂时禁用自动刷新，避免CPU占用过高
+                        const shouldRefresh = false; // TODO: 实现真正的过期检查逻辑
+                        if (shouldRefresh) {
                             this._log('warn', `Node ${providerStatus.uuid} (${providerType}) is near expiration. Enqueuing refresh...`);
                             this._enqueueRefresh(providerType, providerStatus);
                         }
