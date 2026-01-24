@@ -329,6 +329,10 @@ export class KiroApiServiceAdapter extends ApiServiceAdapter {
     constructor(config) {
         super();
         this.kiroApiService = new KiroApiService(config);
+        
+        // 添加重新初始化限制，避免无限重试
+        this.lastInitAttempt = 0;
+        this.initCooldown = 30000; // 30秒冷却时间
         // this.kiroApiService.initialize().catch(error => {
         //     console.error("Failed to initialize kiroApiService:", error);
         // });
@@ -337,7 +341,12 @@ export class KiroApiServiceAdapter extends ApiServiceAdapter {
     async generateContent(model, requestBody) {
         // The adapter expects the requestBody to be in OpenAI format for Kiro API
         if (!this.kiroApiService.isInitialized) {
+            const now = Date.now();
+            if (now - this.lastInitAttempt < this.initCooldown) {
+                throw new Error(`Kiro service not initialized. Next retry available in ${Math.ceil((this.initCooldown - (now - this.lastInitAttempt)) / 1000)}s`);
+            }
             console.warn("kiroApiService not initialized, attempting to re-initialize...");
+            this.lastInitAttempt = now;
             await this.kiroApiService.initialize();
         }
         return this.kiroApiService.generateContent(model, requestBody);
@@ -346,7 +355,12 @@ export class KiroApiServiceAdapter extends ApiServiceAdapter {
     async *generateContentStream(model, requestBody) {
         // The adapter expects the requestBody to be in OpenAI format for Kiro API
         if (!this.kiroApiService.isInitialized) {
+            const now = Date.now();
+            if (now - this.lastInitAttempt < this.initCooldown) {
+                throw new Error(`Kiro service not initialized. Next retry available in ${Math.ceil((this.initCooldown - (now - this.lastInitAttempt)) / 1000)}s`);
+            }
             console.warn("kiroApiService not initialized, attempting to re-initialize...");
+            this.lastInitAttempt = now;
             await this.kiroApiService.initialize();
         }
         const stream = this.kiroApiService.generateContentStream(model, requestBody);
@@ -356,7 +370,12 @@ export class KiroApiServiceAdapter extends ApiServiceAdapter {
     async listModels() {
         // Returns the native model list from the Kiro service
         if (!this.kiroApiService.isInitialized) {
+            const now = Date.now();
+            if (now - this.lastInitAttempt < this.initCooldown) {
+                throw new Error(`Kiro service not initialized. Next retry available in ${Math.ceil((this.initCooldown - (now - this.lastInitAttempt)) / 1000)}s`);
+            }
             console.warn("kiroApiService not initialized, attempting to re-initialize...");
+            this.lastInitAttempt = now;
             await this.kiroApiService.initialize();
         }
         return this.kiroApiService.listModels();
