@@ -1418,6 +1418,10 @@ export class ProviderPoolManager {
         const typesToSave = Array.from(this.pendingSaves);
         if (typesToSave.length === 0) return;
         
+        // 清空待保存列表，避免重复处理
+        this.pendingSaves.clear();
+        this.saveTimer = null;
+        
         // 使用异步队列，避免阻塞API请求
         return new Promise((resolve) => {
             this._writeQueue.push({ typesToSave, resolve });
@@ -1435,8 +1439,6 @@ export class ProviderPoolManager {
         }
         
         this._isProcessingQueue = true;
-        this.pendingSaves.clear();
-        this.saveTimer = null;
         
         // 合并所有待写入的类型
         const allTypesToSave = new Set();
@@ -1506,8 +1508,10 @@ export class ProviderPoolManager {
             }
         }
         
-        // 一次性写入文件
-        await fs.promises.writeFile(filePath, JSON.stringify(currentPools, null, 2), 'utf8');
+        // 原子写入：先写入临时文件，再重命名
+        const tempFilePath = filePath + '.tmp';
+        await fs.promises.writeFile(tempFilePath, JSON.stringify(currentPools, null, 2), 'utf8');
+        await fs.promises.rename(tempFilePath, filePath);
         this._log('info', `configs/provider_pools.json updated successfully for types: ${typesToSave.join(', ')}`);
     }
 
