@@ -339,8 +339,9 @@ export async function handleStreamRequest(res, service, model, requestBody, from
         console.error('\n[Server] Error during stream processing:', error.stack);
         
         // 如果已经发送了内容，不进行重试（避免响应数据损坏）
-        if (fullResponseText.length > 0) {
-            console.log(`[Stream Retry] Cannot retry: ${fullResponseText.length} bytes already sent to client`);
+        if (textChunks.length > 0) {
+            const sentBytes = textChunks.join('').length;
+            console.log(`[Stream Retry] Cannot retry: ${sentBytes} bytes already sent to client`);
             // 直接发送错误并结束
             const errorPayload = createStreamErrorResponse(error, fromProvider);
             res.write(errorPayload);
