@@ -30,13 +30,15 @@
     "start": "node src/core/master.js",
     "start:standalone": "node src/services/api-server.js",
     "start:dev": "node src/core/master.js --dev",
-    "test": "jest",
+    "test": "node docker-test.js",
+    "test:docker": "node docker-test.js",
+    "test:unit": "npx jest tests/basic.test.js tests/gemini-converter.test.js tests/openai-responses-converter.test.js --verbose",
+    "test:integration": "env TEST_API_KEY=AI_club2026 npx jest tests/docker-integration.test.js --verbose",
+    "test:integration:full": "env TEST_API_KEY=AI_club2026 npx jest tests/api-integration.test.js --verbose",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "test:verbose": "jest --verbose",
     "test:silent": "jest --silent",
-    "test:unit": "node run-tests.js --unit",
-    "test:integration": "node run-tests.js --integration",
     "test:summary": "node test-summary.js"
   }
 }

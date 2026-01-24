@@ -15,8 +15,9 @@ import { fetch } from 'undici';
  */
 
 // Test server configuration
-const TEST_SERVER_BASE_URL = 'http://192.168.1.232:3000';
-const TEST_API_KEY = '123456'; // You may need to adjust this based on your server config
+const TEST_SERVER_BASE_URL = process.env.TEST_SERVER_BASE_URL || 'http://localhost:3000';
+const TEST_API_KEY = process.env.TEST_API_KEY || 'AI_club2026';
+const SKIP_INTEGRATION_TESTS = process.env.SKIP_INTEGRATION_TESTS === 'true';
 const MODEL_PROVIDER = {
     // Model provider constants
     GEMINI_CLI: 'gemini-cli-oauth',
@@ -80,28 +81,53 @@ const REAL_TEST_DATA = {
 // To run all integration tests:
 // npx jest ./tests/api-integration.test.js
 describe('API Integration Tests with HTTP Requests', () => {
+    let serverAvailable = false;
+
     beforeAll(async () => {
-        // Test server connectivity
+        if (SKIP_INTEGRATION_TESTS) {
+            console.log('⏭ Skipping integration tests (SKIP_INTEGRATION_TESTS=true)');
+            return;
+        }
+
+        // Test server connectivity with timeout
         try {
-            const healthResponse = await fetch(`${TEST_SERVER_BASE_URL}/health`);
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 5000);
+            
+            const healthResponse = await fetch(`${TEST_SERVER_BASE_URL}/health`, {
+                signal: controller.signal
+            });
+            clearTimeout(timeoutId);
+            
             const healthData = await healthResponse.json();
             console.log('✓ Server is accessible:', healthData);
+            serverAvailable = true;
         } catch (error) {
             console.warn('⚠ Failed to connect to server:', error.message);
             console.log('  Make sure the server is running at', TEST_SERVER_BASE_URL);
+            console.log('  Or set SKIP_INTEGRATION_TESTS=true to skip these tests');
+            serverAvailable = false;
         }
-    }, 30000); // Set a higher timeout for beforeAll
+    }, 10000);
 
     afterAll(() => {
         // Jest handles test results summary automatically
     });
+
+    // Helper function to skip tests if server is not available
+    const skipIfServerUnavailable = () => {
+        if (SKIP_INTEGRATION_TESTS || !serverAvailable) {
+            return test.skip;
+        }
+        return test;
+    };
 
     // To run all OpenAI Compatible Endpoints tests:
     // npx jest ./tests/api-integration.test.js -t "OpenAI Compatible Endpoints"
     describe('OpenAI Compatible Endpoints', () => {
         // To run this test:
         // npx jest ./tests/api-integration.test.js -t "OpenAI /v1/chat/completions non-streaming Gemini"
-        test('OpenAI /v1/chat/completions non-streaming Gemini', async () => {
+        skipIfServerUnavailable()('OpenAI /v1/chat/completions non-streaming Gemini', async () => {
             const response = await makeRequest(
                 `${TEST_SERVER_BASE_URL}/v1/chat/completions`,
                 'POST',
