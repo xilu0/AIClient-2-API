@@ -1860,13 +1860,13 @@ async saveCredentialsToFile(filePath, newData) {
                 const errorCode = error.code;
                 const errorMessage = error.message || '';
                 const isNetworkError = isRetryableNetworkError(error);
-                    }
+                
+                if (status === 403) {
                     this._markCredentialNeedRefresh('403 Forbidden', error);
+                    error.shouldSwitchCredential = true;
+                    error.skipErrorCount = true;
+                    throw error;
                 }
-                error.shouldSwitchCredential = true;
-                error.skipErrorCount = true;
-                throw error;
-            }
                 
                 if (status === 429) {
                     console.log(`[Kiro] Received 429 (Too Many Requests) in stream. Waiting ${baseDelay}ms before switching credential...`);
