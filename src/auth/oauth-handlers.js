@@ -2028,24 +2028,4 @@ export async function importAwsCredentials(credentials, skipDuplicateCheck = fal
     }
 }
 
-// 重新导出所有 OAuth 处理函数以保持向后兼容
-export {
-    // Codex OAuth
-    refreshCodexTokensWithRetry,
-    handleCodexOAuth,
-    handleCodexOAuthCallback,
-    // Gemini OAuth
-    handleGeminiCliOAuth,
-    handleGeminiAntigravityOAuth,
-    // Qwen OAuth
-    handleQwenOAuth,
-    // Kiro OAuth
-    handleKiroOAuth,
-    checkKiroCredentialsDuplicate,
-    batchImportKiroRefreshTokens,
-    batchImportKiroRefreshTokensStream,
-    importAwsCredentials,
-    // iFlow OAuth
-    handleIFlowOAuth,
-    refreshIFlowTokens,
-} from './index.js';
+// Note: All OAuth handling functions are already exported above as individual exports
