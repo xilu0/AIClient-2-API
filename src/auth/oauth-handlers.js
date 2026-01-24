@@ -2034,7 +2034,18 @@ export {
     refreshCodexTokensWithRetry,
     handleCodexOAuth,
     handleCodexOAuthCallback,
-    // Orchids OAuth
-    importOrchidsToken,
-    handleOrchidsOAuth
+    // Gemini OAuth
+    handleGeminiCliOAuth,
+    handleGeminiAntigravityOAuth,
+    // Qwen OAuth
+    handleQwenOAuth,
+    // Kiro OAuth
+    handleKiroOAuth,
+    checkKiroCredentialsDuplicate,
+    batchImportKiroRefreshTokens,
+    batchImportKiroRefreshTokensStream,
+    importAwsCredentials,
+    // iFlow OAuth
+    handleIFlowOAuth,
+    refreshIFlowTokens,
 } from './index.js';

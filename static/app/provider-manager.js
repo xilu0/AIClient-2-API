@@ -205,19 +205,28 @@ function renderProviders(providers) {
     // 始终显示统计卡片
     if (statsGrid) statsGrid.style.display = 'grid';
     
-    // 定义所有支持的提供商显示顺序
-    const providerDisplayOrder = [
-        'gemini-cli-oauth',
-        'gemini-antigravity',
-        'openai-custom',
-        'claude-custom',
-        'claude-kiro-oauth',
-        'claude-orchids-oauth',
-        'openai-qwen-oauth',
-        'openaiResponses-custom',
-        'openai-iflow',
-        'openai-codex-oauth'
+    // 定义所有支持的提供商配置（顺序、显示名称、是否显示）
+    const providerConfigs = [
+        { id: 'forward-api', name: 'NewAPI', visible: false },
+        { id: 'gemini-cli-oauth', name: 'Gemini CLI OAuth', visible: true },
+        { id: 'gemini-antigravity', name: 'Gemini Antigravity', visible: true },
+        { id: 'openai-custom', name: 'OpenAI Custom', visible: true },
+        { id: 'claude-custom', name: 'Claude Custom', visible: true },
+        { id: 'claude-kiro-oauth', name: 'Claude Kiro OAuth', visible: true },
+        { id: 'openai-qwen-oauth', name: 'OpenAI Qwen OAuth', visible: true },
+        { id: 'openaiResponses-custom', name: 'OpenAI Responses', visible: true },
+        { id: 'openai-iflow', name: 'OpenAI iFlow', visible: true },
+        { id: 'openai-codex-oauth', name: 'OpenAI Codex OAuth', visible: true },
     ];
+    
+    // 提取显示的 ID 顺序
+    const providerDisplayOrder = providerConfigs.filter(c => c.visible !== false).map(c => c.id);
+    
+    // 建立 ID 到配置的映射，方便获取显示名称
+    const configMap = providerConfigs.reduce((map, config) => {
+        map[config.id] = config;
+        return map;
+    }, {});
     
     // 获取所有提供商类型并按指定顺序排序
     // 优先显示预定义的所有提供商类型，即使某些提供商没有数据也要显示
@@ -225,12 +234,15 @@ function renderProviders(providers) {
     if (hasProviders) {
         // 合并预定义类型和实际存在的类型，确保显示所有预定义提供商
         const actualProviderTypes = Object.keys(providers);
+        // 只保留配置中标记为 visible 的，或者不在配置中的（默认显示）
         allProviderTypes = [...new Set([...providerDisplayOrder, ...actualProviderTypes])];
     } else {
         allProviderTypes = providerDisplayOrder;
     }
+
+    // 过滤掉明确设置为不显示的提供商
     const sortedProviderTypes = providerDisplayOrder.filter(type => allProviderTypes.includes(type))
-        .concat(allProviderTypes.filter(type => !providerDisplayOrder.includes(type)));
+        .concat(allProviderTypes.filter(type => !providerDisplayOrder.some(t => t === type) && !configMap[type]?.visible === false));
     
     // 计算总统计
     let totalAccounts = 0;
@@ -238,6 +250,11 @@ function renderProviders(providers) {
     
     // 按照排序后的提供商类型渲染
     sortedProviderTypes.forEach((providerType) => {
+        // 如果配置中明确设置为不显示，则跳过
+        if (configMap[providerType] && configMap[providerType].visible === false) {
+            return;
+        }
+
         const accounts = hasProviders ? providers[providerType] || [] : [];
         const providerDiv = document.createElement('div');
         providerDiv.className = 'provider-item';
@@ -276,10 +293,13 @@ function renderProviders(providers) {
         const statusIcon = isEmptyState ? 'fa-info-circle' : (healthyCount === totalCount ? 'fa-check-circle' : 'fa-exclamation-triangle');
         const statusText = isEmptyState ? t('providers.status.empty') : t('providers.status.healthy', { healthy: healthyCount, total: totalCount });
 
+        // 获取显示名称
+        const displayName = configMap[providerType]?.name || providerType;
+
         providerDiv.innerHTML = `
             <div class="provider-header">
                 <div class="provider-name">
-                    <span class="provider-type-text">${providerType}</span>
+                    <span class="provider-type-text">${displayName}</span>
                 </div>
                 <div class="provider-header-right">
                     ${generateAuthButton(providerType)}
@@ -425,20 +445,10 @@ async function openProviderManager(providerType) {
  */
 function generateAuthButton(providerType) {
     // 只为支持OAuth的提供商显示授权按钮
-    const oauthProviders = ['gemini-cli-oauth', 'gemini-antigravity', 'openai-qwen-oauth', 'claude-kiro-oauth', 'claude-orchids-oauth', 'openai-iflow', 'openai-codex-oauth'];
+    const oauthProviders = ['gemini-cli-oauth', 'gemini-antigravity', 'openai-qwen-oauth', 'claude-kiro-oauth', 'openai-iflow', 'openai-codex-oauth'];
 
     if (!oauthProviders.includes(providerType)) {
         return '';
-    }
-
-    // Orchids 提供商使用不同的按钮文本
-    if (providerType === 'claude-orchids-oauth') {
-        return `
-            <button class="generate-auth-btn" title="导入 Orchids Token">
-                <i class="fas fa-seedling" style="color: #10b981;"></i>
-                <span data-i18n="providers.auth.importToken">${t('providers.auth.importToken') || '导入 Token'}</span>
-            </button>
-        `;
     }
 
     // Codex 提供商使用特殊图标
@@ -470,215 +480,7 @@ async function handleGenerateAuthUrl(providerType) {
         return;
     }
 
-    // 如果是 Orchids OAuth，显示 Cookie 导入对话框
-    if (providerType === 'claude-orchids-oauth') {
-        showOrchidsCookieImportDialog(providerType);
-        return;
-    }
-
     await executeGenerateAuthUrl(providerType, {});
-}
-
-/**
- * 显示 Orchids Token 导入对话框
- * 支持两种格式：
- * 1. 纯 JWT 格式：eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...（JWT payload 中包含 rotating_token）
- * 2. JWT|rotating_token 格式：eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...|W7lqx1t8HIxMh0ScDZUB
- * @param {string} providerType - 提供商类型
- */
-function showOrchidsCookieImportDialog(providerType) {
-    const modal = document.createElement('div');
-    modal.className = 'modal-overlay';
-    modal.style.display = 'flex';
-
-    modal.innerHTML = `
-        <div class="modal-content" style="max-width: 750px;">
-            <div class="modal-header">
-                <h3><i class="fas fa-seedling" style="color: #10b981;"></i> <span>${t('oauth.orchids.title')}</span></h3>
-                <button class="modal-close">&times;</button>
-            </div>
-            <div class="modal-body">
-                <!-- JWT Token 格式说明 -->
-                <div id="orchidsTokenInstructions" class="orchids-import-instructions" style="margin-bottom: 16px; padding: 12px; background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 8px;">
-                    <p style="margin: 0; font-size: 14px; color: #065f46;">
-                        <i class="fas fa-info-circle"></i>
-                        ${t('oauth.orchids.tokenInstructions')}
-                    </p>
-                    <div style="margin-top: 12px; padding: 10px; background: #d1fae5; border-radius: 6px; font-size: 13px;">
-                        <p style="margin: 0 0 8px 0; font-weight: 600; color: #047857;">
-                            <i class="fas fa-lightbulb"></i> ${t('oauth.orchids.getSteps')}
-                        </p>
-                        <ol style="margin: 0; padding-left: 20px; color: #065f46;">
-                            <li>${t('oauth.orchids.tokenStep1')}</li>
-                            <li>${t('oauth.orchids.tokenStep2')}</li>
-                            <li>${t('oauth.orchids.tokenStep3')}</li>
-                            <li>${t('oauth.orchids.tokenStep4')}</li>
-                            <li>${t('oauth.orchids.tokenStep5')}</li>
-                        </ol>
-                    </div>
-                    <div style="margin-top: 8px; padding: 8px; background: #d1fae5; border-radius: 6px; font-size: 11px; font-family: monospace; word-break: break-all; color: #047857;">
-                        ${t('oauth.orchids.tokenFormat')}
-                    </div>
-                </div>
-
-                <div class="form-group" style="margin-bottom: 16px;">
-                    <label id="orchidsInputLabel" style="display: block; margin-bottom: 8px; font-weight: 600; color: #374151;">
-                        ${t('oauth.orchids.tokenLabel')} <span style="color: #ef4444;">*</span>
-                    </label>
-                    <textarea id="orchidsTokenInput" rows="4"
-                        style="width: 100%; padding: 10px 12px; border: 1px solid #d1d5db; border-radius: 8px; font-family: monospace; font-size: 12px; resize: vertical;"
-                        placeholder="${t('oauth.orchids.tokenPlaceholder')}"
-                    ></textarea>
-                </div>
-
-                <div id="orchidsValidationResult" style="display: none; margin-bottom: 16px; padding: 12px; border-radius: 8px;"></div>
-                
-                <!-- 解析预览 -->
-                <div id="orchidsParsePreview" style="display: none; margin-bottom: 16px; padding: 12px; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px;">
-                    <p style="margin: 0 0 8px 0; font-weight: 600; color: #166534;">
-                        <i class="fas fa-check-circle"></i> ${t('oauth.orchids.parseSuccess')}
-                    </p>
-                    <div id="orchidsParseDetails" style="font-size: 12px; color: #065f46;"></div>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button class="modal-cancel">${t('modal.provider.cancel')}</button>
-                <button class="modal-submit" id="orchidsSubmitBtn" style="background: #10b981; color: white;">
-                    <i class="fas fa-check"></i>
-                    <span>${t('oauth.orchids.confirmImport')}</span>
-                </button>
-            </div>
-        </div>
-    `;
-
-    document.body.appendChild(modal);
-
-    const closeBtn = modal.querySelector('.modal-close');
-    const cancelBtn = modal.querySelector('.modal-cancel');
-    const submitBtn = modal.querySelector('#orchidsSubmitBtn');
-    const tokenInput = modal.querySelector('#orchidsTokenInput');
-    const validationResult = modal.querySelector('#orchidsValidationResult');
-    const parsePreview = modal.querySelector('#orchidsParsePreview');
-    const parseDetails = modal.querySelector('#orchidsParseDetails');
-
-    // 实时验证输入
-    tokenInput.addEventListener('input', () => {
-        const inputValue = tokenInput.value.trim();
-        if (!inputValue) {
-            validationResult.style.display = 'none';
-            parsePreview.style.display = 'none';
-            return;
-        }
-
-        // 检测 JWT 格式
-        if (inputValue.startsWith('eyJ') && inputValue.split('.').length === 3) {
-            // 尝试解析 JWT
-            try {
-                let jwt = inputValue;
-                let rotatingTokenFromSeparator = null;
-                
-                // 检查是否有 | 分隔符
-                if (inputValue.includes('|')) {
-                    const parts = inputValue.split('|');
-                    jwt = parts[0];
-                    rotatingTokenFromSeparator = parts[1];
-                }
-                
-                const jwtParts = jwt.split('.');
-                if (jwtParts.length === 3) {
-                    let payloadBase64 = jwtParts[1].replace(/-/g, '+').replace(/_/g, '/');
-                    // 添加 padding
-                    while (payloadBase64.length % 4) {
-                        payloadBase64 += '=';
-                    }
-                    const payloadJson = atob(payloadBase64);
-                    const payload = JSON.parse(payloadJson);
-                    
-                    // 检查是否有 rotating_token（从 payload 或分隔符后）
-                    const rotatingToken = payload.rotating_token || rotatingTokenFromSeparator;
-                    
-                    if (rotatingToken) {
-                        validationResult.style.cssText = 'display: block; background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534;';
-                        validationResult.innerHTML = '<i class="fas fa-check-circle"></i> ' + t('oauth.orchids.detectedToken');
-                        
-                        parsePreview.style.display = 'block';
-                        parseDetails.innerHTML = `
-                            <div style="display: grid; gap: 4px;">
-                                <div><strong>${t('oauth.orchids.clientId')}:</strong> <code style="background: #d1fae5; padding: 1px 4px; border-radius: 2px;">${payload.id || 'N/A'}</code></div>
-                                <div><strong>${t('oauth.orchids.rotatingToken')}:</strong> <code style="background: #d1fae5; padding: 1px 4px; border-radius: 2px;">${rotatingToken.substring(0, 30)}...</code></div>
-                            </div>
-                        `;
-                    } else {
-                        validationResult.style.cssText = 'display: block; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b;';
-                        validationResult.innerHTML = '<i class="fas fa-exclamation-triangle"></i> ' + t('oauth.orchids.errorMissingRotating');
-                        parsePreview.style.display = 'none';
-                    }
-                }
-            } catch (e) {
-                validationResult.style.cssText = 'display: block; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b;';
-                validationResult.innerHTML = '<i class="fas fa-exclamation-triangle"></i> ' + t('oauth.orchids.errorJwtParse') + ': ' + e.message;
-                parsePreview.style.display = 'none';
-            }
-        } else {
-            validationResult.style.cssText = 'display: block; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b;';
-            validationResult.innerHTML = '<i class="fas fa-exclamation-triangle"></i> ' + t('oauth.orchids.errorTokenInvalid');
-            parsePreview.style.display = 'none';
-        }
-    });
-
-    // 关闭按钮事件
-    [closeBtn, cancelBtn].forEach(btn => {
-        btn.addEventListener('click', () => modal.remove());
-    });
-
-    // 提交按钮事件
-    submitBtn.addEventListener('click', async () => {
-        const inputValue = tokenInput.value.trim();
-
-        // 验证输入
-        if (!inputValue) {
-            validationResult.style.cssText = 'display: block; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b;';
-            validationResult.innerHTML = '<i class="fas fa-exclamation-triangle"></i> ' + t('oauth.orchids.errorEmpty');
-            return;
-        }
-
-        // JWT 格式验证（支持纯 JWT 和 JWT|rotating_token 格式）
-        let jwt = inputValue;
-        if (inputValue.includes('|')) {
-            jwt = inputValue.split('|')[0];
-        }
-        
-        if (!jwt.startsWith('eyJ') || jwt.split('.').length !== 3) {
-            validationResult.style.cssText = 'display: block; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b;';
-            validationResult.innerHTML = '<i class="fas fa-exclamation-triangle"></i> ' + t('oauth.orchids.errorTokenInvalid');
-            return;
-        }
-
-        // 禁用按钮
-        submitBtn.disabled = true;
-        submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> <span>' + t('oauth.orchids.importing') + '</span>';
-
-        try {
-            const response = await window.apiClient.post('/orchids/import-token', { token: inputValue });
-
-            if (response.success) {
-                showToast(t('common.success'), t('oauth.orchids.success'), 'success');
-                modal.remove();
-                loadProviders();
-                loadConfigList();
-            } else {
-                validationResult.style.cssText = 'display: block; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b;';
-                validationResult.innerHTML = '<i class="fas fa-times-circle"></i> ' + (response.error || t('oauth.orchids.importFailed'));
-            }
-        } catch (error) {
-            console.error('Orchids import failed:', error);
-            validationResult.style.cssText = 'display: block; background: #fef2f2; border: 1px solid #fecaca; color: #991b1b;';
-            validationResult.innerHTML = '<i class="fas fa-times-circle"></i> ' + t('oauth.orchids.importFailed') + ': ' + error.message;
-        } finally {
-            submitBtn.disabled = false;
-            submitBtn.innerHTML = '<i class="fas fa-check"></i> <span>' + t('oauth.orchids.confirmImport') + '</span>';
-        }
-    });
 }
 
 /**

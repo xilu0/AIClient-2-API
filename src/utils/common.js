@@ -56,6 +56,7 @@ export const MODEL_PROTOCOL_PREFIX = {
     CLAUDE: 'claude',
     OLLAMA: 'ollama',
     CODEX: 'codex',
+    FORWARD: 'forward',
 }
 
 export const MODEL_PROVIDER = {
@@ -66,10 +67,10 @@ export const MODEL_PROVIDER = {
     OPENAI_CUSTOM_RESPONSES: 'openaiResponses-custom',
     CLAUDE_CUSTOM: 'claude-custom',
     KIRO_API: 'claude-kiro-oauth',
-    ORCHIDS_API: 'claude-orchids-oauth',
     QWEN_API: 'openai-qwen-oauth',
     IFLOW_API: 'openai-iflow',
     CODEX_API: 'openai-codex-oauth',
+    FORWARD_API: 'forward-api',
 }
 
 /**
@@ -114,6 +115,53 @@ export function formatExpiryTime(expiryTimestamp) {
     const seconds = totalSeconds % 60;
     const pad = (num) => String(num).padStart(2, '0');
     return `${pad(hours)}h ${pad(minutes)}m ${pad(seconds)}s`;
+}
+
+/**
+ * 格式化日志输出，统一日志格式
+ * @param {string} tag - 日志标签，如 'Qwen', 'Kiro' 等
+ * @param {string} message - 日志消息
+ * @param {Object} [data] - 可选的数据对象，将被格式化输出
+ * @returns {string} 格式化后的日志字符串
+ */
+export function formatLog(tag, message, data = null) {
+    let logMessage = `[${tag}] ${message}`;
+    
+    if (data !== null && data !== undefined) {
+        if (typeof data === 'object') {
+            const dataStr = Object.entries(data)
+                .map(([key, value]) => `${key}: ${value}`)
+                .join(', ');
+            logMessage += ` | ${dataStr}`;
+        } else {
+            logMessage += ` | ${data}`;
+        }
+    }
+    
+    return logMessage;
+}
+
+/**
+ * 格式化凭证过期时间日志
+ * @param {string} tag - 日志标签，如 'Qwen', 'Kiro' 等
+ * @param {number} expiryDate - 过期时间戳
+ * @param {number} nearMinutes - 临近过期的分钟数
+ * @returns {{message: string, isNearExpiry: boolean}} 格式化后的日志字符串和是否临近过期
+ */
+export function formatExpiryLog(tag, expiryDate, nearMinutes) {
+    const currentTime = Date.now();
+    const nearMinutesInMillis = nearMinutes * 60 * 1000;
+    const thresholdTime = currentTime + nearMinutesInMillis;
+    const isNearExpiry = expiryDate <= thresholdTime;
+    
+    const message = formatLog(tag, 'Checking expiry date', {
+        'Expiry date': expiryDate,
+        'Current time': currentTime,
+        [`${nearMinutes} minutes from now`]: thresholdTime,
+        'Is near expiry': isNearExpiry
+    });
+    
+    return { message, isNearExpiry };
 }
 
 /**
@@ -640,8 +688,9 @@ export async function handleModelListRequest(req, res, service, endpointType, CO
  * @param {Object} CONFIG - The server configuration object.
  * @param {string} PROMPT_LOG_FILENAME - The prompt log filename.
  */
-export async function handleContentGenerationRequest(req, res, service, endpointType, CONFIG, PROMPT_LOG_FILENAME, providerPoolManager, pooluuid) {
+export async function handleContentGenerationRequest(req, res, service, endpointType, CONFIG, PROMPT_LOG_FILENAME, providerPoolManager, pooluuid, requestPath = null) {
     const originalRequestBody = await getRequestBody(req);
+
     if (!originalRequestBody) {
         throw new Error("Request body is missing for content generation.");
     }
@@ -704,6 +753,12 @@ export async function handleContentGenerationRequest(req, res, service, endpoint
         processedRequestBody = convertData(originalRequestBody, 'request', fromProvider, toProvider);
     } else {
         console.log(`[Request Convert] Request format matches backend provider. No conversion needed.`);
+    }
+    
+    // 为 forward provider 添加原始请求路径作为 endpoint
+    if (requestPath && toProvider === MODEL_PROVIDER.FORWARD_API) {
+        console.log(`[Forward API] Request path: ${requestPath}`);
+        processedRequestBody.endpoint = requestPath;
     }
 
     // 3. Apply system prompt from file if configured.

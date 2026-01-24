@@ -4,10 +4,10 @@ import { AntigravityApiService } from './gemini/antigravity-core.js'; // 导入A
 import { OpenAIApiService } from './openai/openai-core.js'; // 导入OpenAIApiService
 import { ClaudeApiService } from './claude/claude-core.js'; // 导入ClaudeApiService
 import { KiroApiService } from './claude/claude-kiro.js'; // 导入KiroApiService
-import { OrchidsApiService } from './claude/claude-orchids.js'; // 导入OrchidsApiService
 import { QwenApiService } from './openai/qwen-core.js'; // 导入QwenApiService
 import { IFlowApiService } from './openai/iflow-core.js'; // 导入IFlowApiService
 import { CodexApiService } from './openai/codex-core.js'; // 导入CodexApiService
+import { ForwardApiService } from './forward/forward-core.js'; // 导入ForwardApiService
 import { MODEL_PROVIDER } from '../utils/common.js'; // 导入 MODEL_PROVIDER
 
 // 定义AI服务适配器接口
@@ -407,65 +407,6 @@ export class KiroApiServiceAdapter extends ApiServiceAdapter {
     }
 }
 
-// Orchids API 服务适配器
-export class OrchidsApiServiceAdapter extends ApiServiceAdapter {
-    constructor(config) {
-        super();
-        this.orchidsApiService = new OrchidsApiService(config);
-    }
-
-    async generateContent(model, requestBody) {
-        if (!this.orchidsApiService.isInitialized) {
-            await this.orchidsApiService.initialize();
-        }
-        return this.orchidsApiService.generateContent(model, requestBody);
-    }
-
-    async *generateContentStream(model, requestBody) {
-        if (!this.orchidsApiService.isInitialized) {
-            await this.orchidsApiService.initialize();
-        }
-        yield* this.orchidsApiService.generateContentStream(model, requestBody);
-    }
-
-    async listModels() {
-        return this.orchidsApiService.listModels();
-    }
-
-    async refreshToken() {
-        if (!this.orchidsApiService.isInitialized) {
-            await this.orchidsApiService.initialize();
-        }
-        if (this.isExpiryDateNear()) {
-            return this.orchidsApiService.initializeAuth(true);
-        }
-        return Promise.resolve();
-    }
-
-    async forceRefreshToken() {
-        if (!this.orchidsApiService.isInitialized) {
-            await this.orchidsApiService.initialize();
-        }
-        console.log(`[Orchids] Force refreshing token...`);
-        return this.orchidsApiService.initializeAuth(true);
-    }
-
-    isExpiryDateNear() {
-        return this.orchidsApiService.isExpiryDateNear();
-    }
-
-    async getUsageLimits() {
-        if (!this.orchidsApiService.isInitialized) {
-            await this.orchidsApiService.initialize();
-        }
-        return this.orchidsApiService.getUsageLimits();
-    }
-
-    countTokens(requestBody) {
-        return this.orchidsApiService.countTokens(requestBody);
-    }
-}
-
 // Qwen API 服务适配器
 export class QwenApiServiceAdapter extends ApiServiceAdapter {
     constructor(config) {
@@ -628,6 +569,38 @@ export class CodexApiServiceAdapter extends ApiServiceAdapter {
     }
 }
 
+// Forward API 服务适配器
+export class ForwardApiServiceAdapter extends ApiServiceAdapter {
+    constructor(config) {
+        super();
+        this.forwardApiService = new ForwardApiService(config);
+    }
+
+    async generateContent(model, requestBody) {
+        return this.forwardApiService.generateContent(model, requestBody);
+    }
+
+    async *generateContentStream(model, requestBody) {
+        yield* this.forwardApiService.generateContentStream(model, requestBody);
+    }
+
+    async listModels() {
+        return this.forwardApiService.listModels();
+    }
+
+    async refreshToken() {
+        return Promise.resolve();
+    }
+
+    async forceRefreshToken() {
+        return Promise.resolve();
+    }
+
+    isExpiryDateNear() {
+        return false;
+    }
+}
+
 // 用于存储服务适配器单例的映射
 export const serviceInstances = {};
 
@@ -663,11 +636,11 @@ export function getServiceAdapter(config) {
             case MODEL_PROVIDER.IFLOW_API:
                 serviceInstances[providerKey] = new IFlowApiServiceAdapter(config);
                 break;
-            case MODEL_PROVIDER.ORCHIDS_API:
-                serviceInstances[providerKey] = new OrchidsApiServiceAdapter(config);
-                break;
             case MODEL_PROVIDER.CODEX_API:
                 serviceInstances[providerKey] = new CodexApiServiceAdapter(config);
+                break;
+            case MODEL_PROVIDER.FORWARD_API:
+                serviceInstances[providerKey] = new ForwardApiServiceAdapter(config);
                 break;
             default:
                 throw new Error(`Unsupported model provider: ${provider}`);

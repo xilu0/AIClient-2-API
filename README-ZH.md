@@ -34,6 +34,7 @@
 > <details>
 > <summary>点击展开查看详细版本历史</summary>
 >
+> - **2026.01.15** - 优化提供商池管理器：新增异步刷新队列机制、缓冲队列去重、全局并发控制，支持节点预热和自动过期检测
 > - **2026.01.07** - 新增 iFlow 协议支持，通过 OAuth 认证方式访问 Qwen、Kimi、DeepSeek 和 GLM 系列模型，支持自动 token 刷新功能
 > - **2026.01.03** - 新增主题切换功能并优化提供商池初始化，移除使用提供商默认配置的降级策略
 > - **2025.12.30** - 添加主进程管理和自动更新功能
@@ -246,6 +247,13 @@ docker compose up -d
 3. **最佳实践**：推荐配合 **Claude Code** 使用，可获得最优体验
 4. **重要提示**：Kiro 服务使用政策已更新，请访问官方网站查看最新使用限制和条款
 
+#### iFlow OAuth 配置
+1. **首次授权**：在 Web UI 的"配置管理"或"提供商池"页面，点击 iFlow 的"生成授权"按钮
+2. **手机登录**：系统将打开 iFlow 授权页面，使用手机号完成登录验证
+3. **自动保存**：授权成功后，系统会自动获取 API Key 并保存凭据
+4. **支持模型**：Qwen3 系列、Kimi K2、DeepSeek V3/R1、GLM-4.6/4.7 等
+5. **自动刷新**：系统会在 Token 即将过期时自动刷新，无需手动干预
+
 #### 账号池管理配置
 1. **创建号池配置文件**：参考 [provider_pools.json.example](./configs/provider_pools.json.example) 创建配置文件
 2. **配置号池参数**：在 `configs/config.json` 中设置 `PROVIDER_POOLS_FILE_PATH` 指向号池配置文件
@@ -267,6 +275,7 @@ docker compose up -d
 | **Kiro** | `~/.aws/sso/cache/kiro-auth-token.json` | Kiro 认证令牌 |
 | **Qwen** | `~/.qwen/oauth_creds.json` | Qwen OAuth 凭据 |
 | **Antigravity** | `~/.antigravity/oauth_creds.json` | Antigravity OAuth 凭据 (支持 Claude 4.5 Opus) |
+| **iFlow** | `~/.iflow/oauth_creds.json` | iFlow OAuth 凭据 (支持 Qwen、Kimi、DeepSeek、GLM) |
 
 > **说明**：`~` 表示用户主目录（Windows: `C:\Users\用户名`，Linux/macOS: `/home/用户名` 或 `/Users/用户名`）
 
