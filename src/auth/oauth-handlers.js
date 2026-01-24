@@ -8,7 +8,7 @@ import open from 'open';
 import { broadcastEvent } from '../services/ui-manager.js';
 import { autoLinkProviderConfigs } from '../services/service-manager.js';
 import { CONFIG } from '../core/config-manager.js';
-import { handleCodexOAuth } from './codex-oauth.js';
+import { handleCodexOAuth, refreshCodexTokensWithRetry } from './codex-oauth.js';
 
 /**
  * OAuth 提供商配置
@@ -2030,4 +2030,4 @@ export async function importAwsCredentials(credentials, skipDuplicateCheck = fal
 }
 
 // Note: All OAuth handling functions are already exported above as individual exports
-export { handleCodexOAuth };
+export { handleCodexOAuth, refreshCodexTokensWithRetry };
