@@ -51,6 +51,9 @@ export class ProviderPoolManager {
         // 用于确保 selectProvider 的排序 and 更新操作是原子的
         this._selectionLocks = {};
         this._isSelecting = {}; // 同步标志位锁
+        
+        // 文件写入锁，防止并发读写冲突
+        this._fileLock = false;
 
         // --- V2: 读写分离 and 异步刷新队列 ---
         // 刷新并发控制配置
@@ -1406,6 +1409,14 @@ export class ProviderPoolManager {
         const typesToSave = Array.from(this.pendingSaves);
         if (typesToSave.length === 0) return;
         
+        // 文件锁机制，防止并发读写
+        if (this._fileLock) {
+            // 如果已经有写入操作在进行，延迟重试
+            setTimeout(() => this._flushPendingSaves(), 100);
+            return;
+        }
+        
+        this._fileLock = true;
         this.pendingSaves.clear();
         this.saveTimer = null;
         
@@ -1421,7 +1432,8 @@ export class ProviderPoolManager {
                 if (readError.code === 'ENOENT') {
                     this._log('info', 'configs/provider_pools.json does not exist, creating new file.');
                 } else {
-                    throw readError;
+                    this._log('error', `Failed to read provider_pools.json: ${readError.message}`);
+                    return; // 读取失败时直接返回，不进行写入
                 }
             }
 
@@ -1452,6 +1464,9 @@ export class ProviderPoolManager {
             this._log('info', `configs/provider_pools.json updated successfully for types: ${typesToSave.join(', ')}`);
         } catch (error) {
             this._log('error', `Failed to write provider_pools.json: ${error.message}`);
+        } finally {
+            // 释放文件锁
+            this._fileLock = false;
         }
     }
 
