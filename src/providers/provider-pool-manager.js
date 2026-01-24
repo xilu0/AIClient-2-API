@@ -1465,11 +1465,6 @@ export class ProviderPoolManager {
      * @private
      */
     async _performFileWrite(typesToSave) {
-    /**
-     * 执行实际的文件写入操作
-     * @private
-     */
-    async _performFileWrite(typesToSave) {
         const filePath = this.globalConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
         let currentPools = {};
         
