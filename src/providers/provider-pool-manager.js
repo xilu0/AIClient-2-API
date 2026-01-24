@@ -625,7 +625,7 @@ export class ProviderPoolManager {
         if (!options.skipUsageCount) {
             selected.config.usageCount++;
             // 只有在使用次数达到一定阈值时才保存，减少I/O频率
-            if (selected.config.usageCount % 10 === 0) {
+            if (selected.config.usageCount % 50 === 0) {
                 this._debouncedSave(providerType);
             }
         }

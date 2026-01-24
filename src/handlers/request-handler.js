@@ -36,8 +36,8 @@ function parseRequestBody(req) {
  */
 export function createRequestHandler(config, providerPoolManager) {
     return async function requestHandler(req, res) {
-        // Deep copy the config for each request to allow dynamic modification
-        const currentConfig = deepmerge({}, config);
+        // 浅拷贝配置，只在需要修改时深拷贝特定字段
+        const currentConfig = { ...config };
         const requestUrl = new URL(req.url, `http://${req.headers.host}`);
         let path = requestUrl.pathname;
         const method = req.method;
