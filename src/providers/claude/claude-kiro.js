@@ -1645,7 +1645,7 @@ async saveCredentialsToFile(filePath, newData) {
         const events = [];
         let remaining = buffer;
         let searchStart = 0;
-        let maxIterations = 50; // 防止无限循环
+        let maxIterations = 500; // 增加最大迭代次数以处理大量流式数据
         let iterations = 0;
         
         while (iterations < maxIterations) {
@@ -1771,7 +1771,9 @@ async saveCredentialsToFile(filePath, newData) {
         }
         
         if (iterations >= maxIterations) {
-            console.warn('[Kiro] Event stream parsing exceeded max iterations');
+            console.warn(`[Kiro] Event stream parsing exceeded max iterations (${maxIterations}), buffer size: ${remaining.length}, processed events: ${events.length}`);
+            // 当达到最大迭代次数时，清空buffer避免无限累积
+            remaining = '';
         }
         
         // 如果 searchStart 有进展，截取剩余部分
