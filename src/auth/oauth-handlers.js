@@ -2034,20 +2034,6 @@ export {
     refreshCodexTokensWithRetry,
     handleCodexOAuth,
     handleCodexOAuthCallback,
-    // Gemini OAuth
-    handleGeminiCliOAuth,
-    handleGeminiAntigravityOAuth,
-    // Qwen OAuth
-    handleQwenOAuth,
-    // Kiro OAuth
-    handleKiroOAuth,
-    checkKiroCredentialsDuplicate,
-    batchImportKiroRefreshTokens,
-    batchImportKiroRefreshTokensStream,
-    importAwsCredentials,
-    // iFlow OAuth
-    handleIFlowOAuth,
-    refreshIFlowTokens,
     // Orchids OAuth
     importOrchidsToken,
     handleOrchidsOAuth
