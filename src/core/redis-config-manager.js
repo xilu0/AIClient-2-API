@@ -417,6 +417,16 @@ class RedisConfigManager extends StorageAdapter {
             return this._poolsCache;
         }
 
+        // If there are queued writes, prefer file as source of truth
+        // because Redis data may be stale (writes haven't been applied yet)
+        if (this.writeQueue.size > 0 && this.fileAdapter) {
+            console.debug(`[RedisConfig] ${this.writeQueue.size} queued writes, using file as source of truth`);
+            const pools = await this.fileAdapter.getProviderPools();
+            this._poolsCache = pools;
+            this._poolsCacheTime = Date.now();
+            return pools;
+        }
+
         const client = this.redisManager.getClient();
         if (!client || !this.redisManager.isConnected()) {
             if (this.fileAdapter) {
@@ -525,15 +535,21 @@ class RedisConfigManager extends StorageAdapter {
         // Invalidate cache
         this._poolsCache = null;
 
-        const executeResult = await this._execute(async (client) => {
-            await client.atomicProviderUpdate(
-                this._key(`pools:${providerType}`),
-                uuid,
-                JSON.stringify(updates)
-            );
-        }, `updateProvider:${providerType}:${uuid}`);
+        let executeResult = { queued: false };
+        try {
+            executeResult = await this._execute(async (client) => {
+                await client.atomicProviderUpdate(
+                    this._key(`pools:${providerType}`),
+                    uuid,
+                    JSON.stringify(updates)
+                );
+            }, `updateProvider:${providerType}:${uuid}`);
+        } catch (redisError) {
+            console.error(`[RedisConfig] Redis update failed for ${uuid}: ${redisError.message}`);
+            executeResult = { queued: true };
+        }
 
-        // Always sync to file backup to prevent data inconsistency
+        // ALWAYS sync to file backup regardless of Redis result
         if (this.fileAdapter) {
             try {
                 await this.fileAdapter.updateProvider(providerType, uuid, updates);
@@ -556,15 +572,21 @@ class RedisConfigManager extends StorageAdapter {
         // Invalidate cache
         this._poolsCache = null;
 
-        const executeResult = await this._execute(async (client) => {
-            await client.hset(
-                this._key(`pools:${providerType}`),
-                provider.uuid,
-                JSON.stringify(provider)
-            );
-        }, `addProvider:${providerType}:${provider.uuid}`);
+        let executeResult = { queued: false };
+        try {
+            executeResult = await this._execute(async (client) => {
+                await client.hset(
+                    this._key(`pools:${providerType}`),
+                    provider.uuid,
+                    JSON.stringify(provider)
+                );
+            }, `addProvider:${providerType}:${provider.uuid}`);
+        } catch (redisError) {
+            console.error(`[RedisConfig] Redis add failed for ${provider.uuid}: ${redisError.message}`);
+            executeResult = { queued: true };
+        }
 
-        // Always sync to file backup to prevent data loss on Redis failure
+        // ALWAYS sync to file backup regardless of Redis result
         if (this.fileAdapter) {
             try {
                 await this.fileAdapter.addProvider(providerType, provider);
@@ -587,11 +609,18 @@ class RedisConfigManager extends StorageAdapter {
         // Invalidate cache
         this._poolsCache = null;
 
-        const executeResult = await this._execute(async (client) => {
-            await client.hdel(this._key(`pools:${providerType}`), uuid);
-        }, `deleteProvider:${providerType}:${uuid}`);
+        let executeResult = { queued: false };
+        try {
+            executeResult = await this._execute(async (client) => {
+                await client.hdel(this._key(`pools:${providerType}`), uuid);
+            }, `deleteProvider:${providerType}:${uuid}`);
+        } catch (redisError) {
+            console.error(`[RedisConfig] Redis delete failed for ${uuid}: ${redisError.message}`);
+            executeResult = { queued: true }; // Treat as queued since Redis failed
+        }
 
-        // Always sync to file backup to prevent resurrection on Redis failure
+        // ALWAYS sync to file backup regardless of Redis result
+        // This ensures data consistency even if Redis fails or has queued writes
         if (this.fileAdapter) {
             try {
                 await this.fileAdapter.deleteProvider(providerType, uuid);
