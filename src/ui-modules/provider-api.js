@@ -372,17 +372,20 @@ export async function handleDeleteProvider(req, res, currentConfig, providerPool
         }
 
         // Use storage adapter if available
+        let deleteResult = null;
         if (adapter) {
             try {
-                await adapter.deleteProvider(providerType, providerUuid);
-                console.log(`[UI API] Deleted provider ${providerUuid} via ${adapter.getType()}`);
+                deleteResult = await adapter.deleteProvider(providerType, providerUuid);
+                console.log(`[UI API] Deleted provider ${providerUuid} via ${adapter.getType()}${deleteResult?.queued ? ' (queued)' : ''}`);
             } catch (adapterError) {
                 console.error('[UI API] Storage adapter delete failed:', adapterError.message);
             }
         }
 
-        // Also update file storage for backward compatibility
+        // Always update file storage for consistency (regardless of adapter type)
+        // This ensures data persistence even if Redis operations are queued or fail
         if (!adapter || adapter.getType() !== 'redis') {
+            // For non-Redis adapters, update file storage directly
             if (Object.keys(providerPools).length === 0 && existsSync(filePath)) {
                 providerPools = JSON.parse(readFileSync(filePath, 'utf-8'));
             }
@@ -394,19 +397,22 @@ export async function handleDeleteProvider(req, res, currentConfig, providerPool
                     delete providerPools[providerType];
                 }
                 writeFileSync(filePath, JSON.stringify(providerPools, null, 2), 'utf-8');
-                console.log(`[UI API] Deleted provider ${providerUuid} from ${providerType}`);
+                console.log(`[UI API] Deleted provider ${providerUuid} from file storage`);
             }
         }
+        // Note: For Redis adapter, deleteProvider already syncs to file backup internally
 
-        // Update provider pool manager if available
+        // Update provider pool manager directly from memory to avoid race conditions
+        // Do NOT reload from adapter as it may return stale data if Redis is unavailable
         if (providerPoolManager) {
-            if (adapter) {
-                const pools = await adapter.getProviderPools();
-                providerPoolManager.providerPools = pools;
-            } else {
-                providerPoolManager.providerPools = providerPools;
+            const providers = providerPoolManager.providerPools[providerType] || [];
+            providerPoolManager.providerPools[providerType] = providers.filter(p => p.uuid !== providerUuid);
+            // Clean up empty provider type
+            if (providerPoolManager.providerPools[providerType]?.length === 0) {
+                delete providerPoolManager.providerPools[providerType];
             }
             providerPoolManager.initializeProviderStatus();
+            console.log(`[UI API] Updated in-memory provider pool manager`);
         }
 
         // 广播更新事件
@@ -588,23 +594,35 @@ export async function handleResetProviderHealth(req, res, currentConfig, provide
 export async function handleDeleteUnhealthyProviders(req, res, currentConfig, providerPoolManager, providerType) {
     try {
         const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
-        let providerPools = {};
-        
-        // Load existing pools
-        if (existsSync(filePath)) {
+        const adapter = getAdapter();
+        let providers = [];
+
+        // Try to get providers from storage adapter first (Redis), then fall back to file
+        if (adapter) {
             try {
-                const fileContent = readFileSync(filePath, 'utf-8');
-                providerPools = JSON.parse(fileContent);
-            } catch (readError) {
-                res.writeHead(404, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: { message: 'Provider pools file not found' } }));
-                return true;
+                const pools = await adapter.getProviderPools();
+                providers = pools[providerType] || [];
+            } catch (adapterError) {
+                console.error('[UI API] Storage adapter read failed:', adapterError.message);
             }
         }
 
-        // Find and remove unhealthy providers
-        const providers = providerPools[providerType] || [];
-        
+        // Fall back to file if adapter didn't return data
+        if (providers.length === 0 && existsSync(filePath)) {
+            try {
+                const fileContent = readFileSync(filePath, 'utf-8');
+                const filePools = JSON.parse(fileContent);
+                providers = filePools[providerType] || [];
+            } catch (readError) {
+                // File read failed, continue with empty providers
+            }
+        }
+
+        // Also check in-memory providerPoolManager as last resort
+        if (providers.length === 0 && providerPoolManager) {
+            providers = providerPoolManager.providerPools[providerType] || [];
+        }
+
         if (providers.length === 0) {
             res.writeHead(404, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: { message: 'No providers found for this type' } }));
@@ -614,7 +632,7 @@ export async function handleDeleteUnhealthyProviders(req, res, currentConfig, pr
         // Filter out unhealthy providers (keep only healthy ones)
         const unhealthyProviders = providers.filter(p => !p.isHealthy);
         const healthyProviders = providers.filter(p => p.isHealthy);
-        
+
         if (unhealthyProviders.length === 0) {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({
@@ -626,21 +644,47 @@ export async function handleDeleteUnhealthyProviders(req, res, currentConfig, pr
             return true;
         }
 
-        // Update the provider pool with only healthy providers
-        if (healthyProviders.length === 0) {
-            delete providerPools[providerType];
-        } else {
-            providerPools[providerType] = healthyProviders;
+        // Delete unhealthy providers from storage adapter
+        if (adapter) {
+            for (const provider of unhealthyProviders) {
+                try {
+                    await adapter.deleteProvider(providerType, provider.uuid);
+                    console.log(`[UI API] Deleted unhealthy provider ${provider.uuid} via ${adapter.getType()}`);
+                } catch (adapterError) {
+                    console.error(`[UI API] Storage adapter delete failed for ${provider.uuid}:`, adapterError.message);
+                }
+            }
         }
 
-        // Save to file
-        writeFileSync(filePath, JSON.stringify(providerPools, null, 2), 'utf-8');
-        console.log(`[UI API] Deleted ${unhealthyProviders.length} unhealthy providers from ${providerType}`);
+        // Always update file storage for consistency (for non-Redis or as backup)
+        if (!adapter || adapter.getType() !== 'redis') {
+            // For non-Redis adapters, update file storage directly
+            if (existsSync(filePath)) {
+                try {
+                    const fileContent = readFileSync(filePath, 'utf-8');
+                    const filePools = JSON.parse(fileContent);
+                    if (healthyProviders.length === 0) {
+                        delete filePools[providerType];
+                    } else {
+                        filePools[providerType] = healthyProviders;
+                    }
+                    writeFileSync(filePath, JSON.stringify(filePools, null, 2), 'utf-8');
+                    console.log(`[UI API] Updated file storage after deleting ${unhealthyProviders.length} unhealthy providers`);
+                } catch (fileError) {
+                    console.error('[UI API] File storage update failed:', fileError.message);
+                }
+            }
+        }
+        // Note: For Redis adapter, deleteProvider already syncs to file backup internally
 
-        // Update provider pool manager if available
+        // Update provider pool manager directly from memory to avoid race conditions
         if (providerPoolManager) {
-            providerPoolManager.providerPools = providerPools;
+            providerPoolManager.providerPools[providerType] = healthyProviders;
+            if (healthyProviders.length === 0) {
+                delete providerPoolManager.providerPools[providerType];
+            }
             providerPoolManager.initializeProviderStatus();
+            console.log(`[UI API] Updated in-memory provider pool manager`);
         }
 
         // 广播更新事件
@@ -675,23 +719,35 @@ export async function handleDeleteUnhealthyProviders(req, res, currentConfig, pr
 export async function handleRefreshUnhealthyUuids(req, res, currentConfig, providerPoolManager, providerType) {
     try {
         const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
-        let providerPools = {};
-        
-        // Load existing pools
-        if (existsSync(filePath)) {
+        const adapter = getAdapter();
+        let providers = [];
+
+        // Try to get providers from storage adapter first (Redis), then fall back to file
+        if (adapter) {
             try {
-                const fileContent = readFileSync(filePath, 'utf-8');
-                providerPools = JSON.parse(fileContent);
-            } catch (readError) {
-                res.writeHead(404, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: { message: 'Provider pools file not found' } }));
-                return true;
+                const pools = await adapter.getProviderPools();
+                providers = pools[providerType] || [];
+            } catch (adapterError) {
+                console.error('[UI API] Storage adapter read failed:', adapterError.message);
             }
         }
 
-        // Find unhealthy providers
-        const providers = providerPools[providerType] || [];
-        
+        // Fall back to file if adapter didn't return data
+        if (providers.length === 0 && existsSync(filePath)) {
+            try {
+                const fileContent = readFileSync(filePath, 'utf-8');
+                const filePools = JSON.parse(fileContent);
+                providers = filePools[providerType] || [];
+            } catch (readError) {
+                // File read failed, continue with empty providers
+            }
+        }
+
+        // Also check in-memory providerPoolManager as last resort
+        if (providers.length === 0 && providerPoolManager) {
+            providers = providerPoolManager.providerPools[providerType] || [];
+        }
+
         if (providers.length === 0) {
             res.writeHead(404, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: { message: 'No providers found for this type' } }));
@@ -704,7 +760,22 @@ export async function handleRefreshUnhealthyUuids(req, res, currentConfig, provi
             if (!provider.isHealthy) {
                 const oldUuid = provider.uuid;
                 const newUuid = generateUUID();
-                provider.uuid = newUuid;
+
+                // Delete old entry and add new one in storage adapter
+                if (adapter) {
+                    try {
+                        await adapter.deleteProvider(providerType, oldUuid);
+                        provider.uuid = newUuid;
+                        await adapter.addProvider(providerType, provider);
+                        console.log(`[UI API] Refreshed UUID ${oldUuid} -> ${newUuid} via ${adapter.getType()}`);
+                    } catch (adapterError) {
+                        console.error(`[UI API] Storage adapter UUID refresh failed for ${oldUuid}:`, adapterError.message);
+                        provider.uuid = newUuid; // Still update in memory
+                    }
+                } else {
+                    provider.uuid = newUuid;
+                }
+
                 refreshedProviders.push({
                     oldUuid,
                     newUuid,
@@ -724,14 +795,28 @@ export async function handleRefreshUnhealthyUuids(req, res, currentConfig, provi
             return true;
         }
 
-        // Save to file
-        writeFileSync(filePath, JSON.stringify(providerPools, null, 2), 'utf-8');
-        console.log(`[UI API] Refreshed UUIDs for ${refreshedProviders.length} unhealthy providers in ${providerType}`);
+        // Always update file storage for consistency (for non-Redis or as backup)
+        if (!adapter || adapter.getType() !== 'redis') {
+            // For non-Redis adapters, update file storage directly
+            if (existsSync(filePath)) {
+                try {
+                    const fileContent = readFileSync(filePath, 'utf-8');
+                    const filePools = JSON.parse(fileContent);
+                    filePools[providerType] = providers;
+                    writeFileSync(filePath, JSON.stringify(filePools, null, 2), 'utf-8');
+                    console.log(`[UI API] Updated file storage after refreshing ${refreshedProviders.length} UUIDs`);
+                } catch (fileError) {
+                    console.error('[UI API] File storage update failed:', fileError.message);
+                }
+            }
+        }
+        // Note: For Redis adapter, deleteProvider/addProvider already sync to file backup internally
 
-        // Update provider pool manager if available
+        // Update provider pool manager directly from memory
         if (providerPoolManager) {
-            providerPoolManager.providerPools = providerPools;
+            providerPoolManager.providerPools[providerType] = providers;
             providerPoolManager.initializeProviderStatus();
+            console.log(`[UI API] Updated in-memory provider pool manager`);
         }
 
         // 广播更新事件

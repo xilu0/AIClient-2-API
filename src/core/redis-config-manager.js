@@ -314,6 +314,9 @@ class RedisConfigManager extends StorageAdapter {
     /**
      * Execute a Redis command with fallback to queue on failure
      * @private
+     * @param {Function} command - The command to execute
+     * @param {string} description - Description of the command for logging
+     * @returns {Promise<{queued: boolean, result?: any}>} Object indicating if command was queued and optional result
      */
     async _execute(command, description = '') {
         const client = this.redisManager.getClient();
@@ -325,11 +328,12 @@ class RedisConfigManager extends StorageAdapter {
             }, description);
             this.redisManager.setQueuedWrites(this.writeQueue.size);
             console.log(`[RedisConfig] Queued write: ${description}`);
-            return null;
+            return { queued: true, result: null };
         }
 
         try {
-            return await command(client);
+            const result = await command(client);
+            return { queued: false, result };
         } catch (error) {
             console.error(`[RedisConfig] Command failed: ${description} - ${error.message}`);
             // Queue for retry if it's a connection error
@@ -510,39 +514,94 @@ class RedisConfigManager extends StorageAdapter {
         }
     }
 
+    /**
+     * Update a provider in Redis and sync to file backup
+     * @param {string} providerType - The provider type
+     * @param {string} uuid - The provider UUID
+     * @param {Object} updates - The fields to update
+     * @returns {Promise<{queued: boolean}>} Status indicating if operation was queued
+     */
     async updateProvider(providerType, uuid, updates) {
         // Invalidate cache
         this._poolsCache = null;
 
-        await this._execute(async (client) => {
+        const executeResult = await this._execute(async (client) => {
             await client.atomicProviderUpdate(
                 this._key(`pools:${providerType}`),
                 uuid,
                 JSON.stringify(updates)
             );
         }, `updateProvider:${providerType}:${uuid}`);
+
+        // Always sync to file backup to prevent data inconsistency
+        if (this.fileAdapter) {
+            try {
+                await this.fileAdapter.updateProvider(providerType, uuid, updates);
+                console.log(`[RedisConfig] Synced provider ${uuid} update to file backup`);
+            } catch (err) {
+                console.warn(`[RedisConfig] File backup update failed: ${err.message}`);
+            }
+        }
+
+        return { queued: executeResult.queued };
     }
 
+    /**
+     * Add a provider to Redis and sync to file backup
+     * @param {string} providerType - The provider type
+     * @param {Object} provider - The provider configuration
+     * @returns {Promise<{queued: boolean}>} Status indicating if operation was queued
+     */
     async addProvider(providerType, provider) {
         // Invalidate cache
         this._poolsCache = null;
 
-        await this._execute(async (client) => {
+        const executeResult = await this._execute(async (client) => {
             await client.hset(
                 this._key(`pools:${providerType}`),
                 provider.uuid,
                 JSON.stringify(provider)
             );
         }, `addProvider:${providerType}:${provider.uuid}`);
+
+        // Always sync to file backup to prevent data loss on Redis failure
+        if (this.fileAdapter) {
+            try {
+                await this.fileAdapter.addProvider(providerType, provider);
+                console.log(`[RedisConfig] Synced provider ${provider.uuid} addition to file backup`);
+            } catch (err) {
+                console.warn(`[RedisConfig] File backup add failed: ${err.message}`);
+            }
+        }
+
+        return { queued: executeResult.queued };
     }
 
+    /**
+     * Delete a provider from Redis and sync to file backup
+     * @param {string} providerType - The provider type
+     * @param {string} uuid - The provider UUID
+     * @returns {Promise<{queued: boolean}>} Status indicating if deletion was queued
+     */
     async deleteProvider(providerType, uuid) {
         // Invalidate cache
         this._poolsCache = null;
 
-        await this._execute(async (client) => {
+        const executeResult = await this._execute(async (client) => {
             await client.hdel(this._key(`pools:${providerType}`), uuid);
         }, `deleteProvider:${providerType}:${uuid}`);
+
+        // Always sync to file backup to prevent resurrection on Redis failure
+        if (this.fileAdapter) {
+            try {
+                await this.fileAdapter.deleteProvider(providerType, uuid);
+                console.log(`[RedisConfig] Synced provider ${uuid} deletion to file backup`);
+            } catch (err) {
+                console.warn(`[RedisConfig] File backup delete failed: ${err.message}`);
+            }
+        }
+
+        return { queued: executeResult.queued };
     }
 
     // ==================== Atomic Counter Operations ====================
@@ -552,7 +611,7 @@ class RedisConfigManager extends StorageAdapter {
         this._poolsCache = null;
 
         const timestamp = new Date().toISOString();
-        const result = await this._execute(async (client) => {
+        const executeResult = await this._execute(async (client) => {
             return await client.atomicUsageUpdate(
                 this._key(`pools:${providerType}`),
                 uuid,
@@ -560,7 +619,7 @@ class RedisConfigManager extends StorageAdapter {
             );
         }, `incrementUsage:${providerType}:${uuid}`);
 
-        return result || 0;
+        return executeResult.result || 0;
     }
 
     async incrementError(providerType, uuid, markUnhealthy = false) {
@@ -568,7 +627,7 @@ class RedisConfigManager extends StorageAdapter {
         this._poolsCache = null;
 
         const timestamp = new Date().toISOString();
-        const result = await this._execute(async (client) => {
+        const executeResult = await this._execute(async (client) => {
             return await client.atomicErrorUpdate(
                 this._key(`pools:${providerType}`),
                 uuid,
@@ -577,7 +636,7 @@ class RedisConfigManager extends StorageAdapter {
             );
         }, `incrementError:${providerType}:${uuid}`);
 
-        return result || 0;
+        return executeResult.result || 0;
     }
 
     async updateHealthStatus(providerType, uuid, isHealthy) {
