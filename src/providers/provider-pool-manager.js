@@ -5,6 +5,7 @@ import { MODEL_PROVIDER, getProtocolPrefix } from '../utils/common.js';
 import { getProviderModels } from './provider-models.js';
 import axios from 'axios';
 import { getStorageAdapter, isStorageInitialized } from '../core/storage-factory.js';
+import { KeyedMutex } from '../utils/async-mutex.js';
 
 /**
  * Manages a pool of API service providers, handling their health and selection.
@@ -51,7 +52,9 @@ export class ProviderPoolManager {
         // 并发控制：每个 providerType 的选择锁
         // 用于确保 selectProvider 的排序 and 更新操作是原子的
         this._selectionLocks = {};
-        this._isSelecting = {}; // 同步标志位锁
+        this._isSelecting = {}; // Legacy: kept for compatibility
+        // Promise-based mutex for selection (avoids busy-wait polling)
+        this._selectionMutex = new KeyedMutex();
         
         // 文件写入锁，防止并发读写冲突
         this._fileLock = false;
@@ -653,21 +656,12 @@ export class ProviderPoolManager {
             this._log('error', `Invalid providerType: ${providerType}`);
             return null;
         }
- 
-        // 使用标志位 + 异步等待实现更强力的互斥锁
-        // 这种方式能更好地处理同一微任务循环内的并发
-        while (this._isSelecting[providerType]) {
-            await new Promise(resolve => setImmediate(resolve));
-        }
-        
-        this._isSelecting[providerType] = true;
-        
-        try {
-            // 在锁内部执行同步选择
+
+        // Use Promise-based mutex instead of busy-wait polling
+        // This avoids blocking the event loop with setImmediate polling
+        return this._selectionMutex.withLock(providerType, () => {
             return this._doSelectProvider(providerType, requestedModel, options);
-        } finally {
-            this._isSelecting[providerType] = false;
-        }
+        });
     }
 
     /**
@@ -730,8 +724,13 @@ export class ProviderPoolManager {
         this._selectionSequence++;
         selected.config._lastSelectionSeq = this._selectionSequence;
         
-        // 强制打印选中日志，方便排查并发问题
-        this._log('info', `[Concurrency Control] Atomic selection: ${selected.config.uuid} (Seq: ${this._selectionSequence})`);
+        // Log selection at debug level with 10% sampling to reduce logging overhead
+        // Use info level only for sampled entries to assist with debugging when needed
+        if (this._selectionSequence % 10 === 0) {
+            this._log('info', `[Concurrency Control] Atomic selection: ${selected.config.uuid} (Seq: ${this._selectionSequence})`);
+        } else {
+            this._log('debug', `[Concurrency Control] Atomic selection: ${selected.config.uuid} (Seq: ${this._selectionSequence})`);
+        }
 
         if (!options.skipUsageCount) {
             selected.config.usageCount++;

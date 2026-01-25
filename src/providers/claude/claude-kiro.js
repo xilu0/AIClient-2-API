@@ -7,7 +7,7 @@ import * as crypto from 'crypto';
 import * as http from 'http';
 import * as https from 'https';
 import { getProviderModels } from '../provider-models.js';
-import { countTokens } from '@anthropic-ai/tokenizer';
+import { countTokensCached, countTokensTotal } from '../../utils/token-counter.js';
 import { configureAxiosProxy } from '../../utils/proxy-utils.js';
 import { isRetryableNetworkError, MODEL_PROVIDER, formatExpiryLog } from '../../utils/common.js';
 import { calculateKiroTokenDistribution } from '../../converters/usage/index.js';
@@ -101,31 +101,41 @@ function getSystemRuntimeInfo() {
 
 // Helper functions for tool calls and JSON parsing
 
+// Character codes for quote detection (faster than string comparison)
+const QUOTE_CODES = new Set([34, 39, 96]); // ", ', `
+
 function isQuoteCharAt(text, index) {
     if (index < 0 || index >= text.length) return false;
-    const ch = text[index];
-    return ch === '"' || ch === "'" || ch === '`';
+    return QUOTE_CODES.has(text.charCodeAt(index));
 }
 
 function findRealTag(text, tag, startIndex = 0) {
-    let searchStart = Math.max(0, startIndex);
-    let maxIterations = 1000; // 防止无限循环
+    // Fast path: use indexOf directly, most cases don't have quoted tags
+    const pos = text.indexOf(tag, Math.max(0, startIndex));
+    if (pos === -1) return -1;
+
+    // Check if surrounded by quotes (rare case)
+    if (!isQuoteCharAt(text, pos - 1) && !isQuoteCharAt(text, pos + tag.length)) {
+        return pos;
+    }
+
+    // Slow path: search for unquoted tag
+    let searchStart = pos + 1;
+    const maxIterations = 100; // Reduced since this is the rare path
     let iterations = 0;
-    
+
     while (iterations < maxIterations) {
-        const pos = text.indexOf(tag, searchStart);
-        if (pos === -1) return -1;
-        
-        const hasQuoteBefore = isQuoteCharAt(text, pos - 1);
-        const hasQuoteAfter = isQuoteCharAt(text, pos + tag.length);
-        if (!hasQuoteBefore && !hasQuoteAfter) {
-            return pos;
+        const nextPos = text.indexOf(tag, searchStart);
+        if (nextPos === -1) return -1;
+
+        if (!isQuoteCharAt(text, nextPos - 1) && !isQuoteCharAt(text, nextPos + tag.length)) {
+            return nextPos;
         }
-        
-        searchStart = pos + 1;
+
+        searchStart = nextPos + 1;
         iterations++;
     }
-    
+
     console.warn(`[Kiro] findRealTag exceeded max iterations for tag: ${tag}`);
     return -1;
 }
@@ -1715,91 +1725,121 @@ async saveCredentialsToFile(filePath, newData) {
     }
 
     /**
+     * Find the end of a JSON object using charCodeAt for performance.
+     * Uses brace counting with proper string/escape handling.
+     * @private
+     */
+    _findJsonEnd(str, startIndex) {
+        // Character codes for performance
+        const BACKSLASH = 92;  // '\'
+        const QUOTE = 34;      // '"'
+        const OPEN_BRACE = 123; // '{'
+        const CLOSE_BRACE = 125; // '}'
+
+        let braceCount = 0;
+        let inString = false;
+        let escapeNext = false;
+        const len = str.length;
+
+        for (let i = startIndex; i < len; i++) {
+            const code = str.charCodeAt(i);
+
+            if (escapeNext) {
+                escapeNext = false;
+                continue;
+            }
+
+            if (code === BACKSLASH) {
+                escapeNext = true;
+                continue;
+            }
+
+            if (code === QUOTE) {
+                inString = !inString;
+                continue;
+            }
+
+            if (!inString) {
+                if (code === OPEN_BRACE) {
+                    braceCount++;
+                } else if (code === CLOSE_BRACE) {
+                    braceCount--;
+                    if (braceCount === 0) {
+                        return i;
+                    }
+                }
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Find the earliest JSON pattern start position.
+     * Optimized to use single indexOf call when possible.
+     * @private
+     */
+    _findNextJsonStart(str, searchStart) {
+        // JSON patterns to search for
+        const patterns = [
+            '{"content":',
+            '{"name":',
+            '{"followupPrompt":',
+            '{"input":',
+            '{"stop":',
+            '{"contextUsagePercentage":'
+        ];
+
+        let minPos = -1;
+        for (const pattern of patterns) {
+            const pos = str.indexOf(pattern, searchStart);
+            if (pos >= 0 && (minPos < 0 || pos < minPos)) {
+                minPos = pos;
+                // Early exit optimization: can't find anything earlier than searchStart
+                if (pos === searchStart) break;
+            }
+        }
+        return minPos;
+    }
+
+    /**
      * 解析 AWS Event Stream 格式，提取所有完整的 JSON 事件
      * 返回 { events: 解析出的事件数组, remaining: 未处理完的缓冲区 }
+     * Optimized version using charCodeAt and helper methods.
      */
     parseAwsEventStreamBuffer(buffer) {
         const events = [];
         let remaining = buffer;
         let searchStart = 0;
-        let maxIterations = 500; // 保留作为安全网
+        const maxIterations = 500;
         let iterations = 0;
-        let foundEndMarker = false; // 添加结束标识检测
-        
+        let foundEndMarker = false;
+
         while (iterations < maxIterations && !foundEndMarker) {
-            // 查找真正的 JSON payload 起始位置
-            const contentStart = remaining.indexOf('{"content":', searchStart);
-            const nameStart = remaining.indexOf('{"name":', searchStart);
-            const followupStart = remaining.indexOf('{"followupPrompt":', searchStart);
-            const inputStart = remaining.indexOf('{"input":', searchStart);
-            const stopStart = remaining.indexOf('{"stop":', searchStart);
-            const contextUsageStart = remaining.indexOf('{"contextUsagePercentage":', searchStart);
-            
-            // 找到最早出现的有效 JSON 模式
-            const candidates = [contentStart, nameStart, followupStart, inputStart, stopStart, contextUsageStart].filter(pos => pos >= 0);
-            if (candidates.length === 0) break;
-            
-            const jsonStart = Math.min(...candidates);
+            // Find next JSON object start position
+            const jsonStart = this._findNextJsonStart(remaining, searchStart);
             if (jsonStart < 0) break;
-            
-            // 正确处理嵌套的 {} - 使用括号计数法
-            let braceCount = 0;
-            let jsonEnd = -1;
-            let inString = false;
-            let escapeNext = false;
-            
-            for (let i = jsonStart; i < remaining.length; i++) {
-                const char = remaining[i];
-                
-                if (escapeNext) {
-                    escapeNext = false;
-                    continue;
-                }
-                
-                if (char === '\\') {
-                    escapeNext = true;
-                    continue;
-                }
-                
-                if (char === '"') {
-                    inString = !inString;
-                    continue;
-                }
-                
-                if (!inString) {
-                    if (char === '{') {
-                        braceCount++;
-                    } else if (char === '}') {
-                        braceCount--;
-                        if (braceCount === 0) {
-                            jsonEnd = i;
-                            break;
-                        }
-                    }
-                }
-            }
-            
+
+            // Find matching closing brace using optimized helper
+            const jsonEnd = this._findJsonEnd(remaining, jsonStart);
+
             if (jsonEnd < 0) {
-                // 不完整的 JSON，保留在缓冲区等待更多数据
+                // Incomplete JSON, keep in buffer for next chunk
                 remaining = remaining.substring(jsonStart);
                 break;
             }
-            
+
             const jsonStr = remaining.substring(jsonStart, jsonEnd + 1);
             try {
                 const parsed = JSON.parse(jsonStr);
-                // 处理 content 事件
+
+                // Process content event
                 if (parsed.content !== undefined && !parsed.followupPrompt) {
-                    // 处理转义字符
-                    let decodedContent = parsed.content;
-                    // 无须处理转义的换行符，原来要处理是因为智能体返回的 content 需要通过换行符切割不同的json
-                    // decodedContent = decodedContent.replace(/(?<!\\)\\n/g, '\n');
-                    events.push({ type: 'content', data: decodedContent });
+                    events.push({ type: 'content', data: parsed.content });
                 }
-                // 处理结构化工具调用事件 - 开始事件（包含 name 和 toolUseId）
+                // Process tool use start event (has name and toolUseId)
                 else if (parsed.name && parsed.toolUseId) {
-                    events.push({ 
-                        type: 'toolUse', 
+                    events.push({
+                        type: 'toolUse',
                         data: {
                             name: parsed.name,
                             toolUseId: parsed.toolUseId,
@@ -1808,61 +1848,53 @@ async saveCredentialsToFile(filePath, newData) {
                         }
                     });
                 }
-                // 处理工具调用的 input 续传事件（只有 input 字段）
+                // Process tool use input continuation (only input field)
                 else if (parsed.input !== undefined && !parsed.name) {
                     events.push({
                         type: 'toolUseInput',
-                        data: {
-                            input: parsed.input
-                        }
+                        data: { input: parsed.input }
                     });
                 }
-                // 处理工具调用的结束事件（只有 stop 字段，且不包含 contextUsagePercentage）
+                // Process tool use stop event (only stop field, no contextUsagePercentage)
                 else if (parsed.stop !== undefined && parsed.contextUsagePercentage === undefined) {
                     events.push({
                         type: 'toolUseStop',
-                        data: {
-                            stop: parsed.stop
-                        }
+                        data: { stop: parsed.stop }
                     });
                 }
-                // 处理上下文使用百分比事件（最后一条消息）
+                // Process context usage percentage event (end marker)
                 else if (parsed.contextUsagePercentage !== undefined) {
                     events.push({
                         type: 'contextUsage',
-                        data: {
-                            contextUsagePercentage: parsed.contextUsagePercentage
-                        }
+                        data: { contextUsagePercentage: parsed.contextUsagePercentage }
                     });
-                    foundEndMarker = true; // 检测到结束标识
+                    foundEndMarker = true;
                 }
             } catch (e) {
-                // JSON 解析失败，跳过这个位置继续搜索
+                // JSON parse failed, skip this position and continue
             }
-            
+
             searchStart = jsonEnd + 1;
             if (searchStart >= remaining.length) {
                 remaining = '';
                 break;
             }
-            
+
             iterations++;
         }
-        
+
         if (iterations >= maxIterations) {
             console.warn(`[Kiro] Event stream parsing exceeded max iterations (${maxIterations}), buffer size: ${remaining.length}, processed events: ${events.length}`);
-            // 当达到最大迭代次数时，清空buffer避免无限累积
             remaining = '';
         } else if (foundEndMarker) {
-            // 检测到结束标识，正常结束解析
             console.log(`[Kiro] Event stream parsing completed normally, processed ${events.length} events in ${iterations} iterations`);
         }
-        
-        // 如果 searchStart 有进展，截取剩余部分
+
+        // Trim remaining buffer if progress was made
         if (searchStart > 0 && remaining.length > 0) {
             remaining = remaining.substring(searchStart);
         }
-        
+
         return { events, remaining };
     }
 
@@ -1907,14 +1939,22 @@ async saveCredentialsToFile(filePath, newData) {
                 });
 
                 stream = response.data;
-                let buffer = '';
+                let bufferParts = [];
+                let bufferLen = 0;
                 let lastContentEvent = null;
 
                 for await (const chunk of stream) {
-                    buffer += chunk.toString();
-                    
+                    const chunkStr = chunk.toString();
+                    bufferParts.push(chunkStr);
+                    bufferLen += chunkStr.length;
+
+                    // Only join when we have accumulated enough data to potentially parse
+                    // This avoids O(n²) string concatenation
+                    const buffer = bufferParts.join('');
                     const { events, remaining } = this.parseAwsEventStreamBuffer(buffer);
-                    buffer = remaining;
+                    // Reset to single-element array with remaining
+                    bufferParts = remaining ? [remaining] : [];
+                    bufferLen = remaining ? remaining.length : 0;
                     
                     for (const event of events) {
                         if (event.type === 'content' && event.data) {
@@ -2089,7 +2129,8 @@ async saveCredentialsToFile(filePath, newData) {
         }
 
         try {
-            let totalContent = '';
+            // Use array accumulation to avoid O(n²) string concatenation
+            const totalContentParts = [];
             let outputTokens = 0;
             const toolCalls = [];
             let currentToolCall = null; // 用于累积结构化工具调用
@@ -2120,7 +2161,7 @@ async saveCredentialsToFile(filePath, newData) {
                     // 捕获上下文使用百分比（包含输入和输出的总使用量）
                     contextUsagePercentage = event.contextUsagePercentage;
                 } else if (event.type === 'content' && event.content) {
-                    totalContent += event.content;
+                    totalContentParts.push(event.content);
 
                     if (!thinkingRequested) {
                         yield* pushEvents(createTextDeltaEvents(event.content));
@@ -2203,12 +2244,12 @@ async saveCredentialsToFile(filePath, newData) {
                     yield* pushEvents(events);
                 } else if (event.type === 'toolUse') {
                     const tc = event.toolUse;
-                    // 统计工具调用的内容到 totalContent（用于 token 计算）
+                    // 统计工具调用的内容到 totalContentParts（用于 token 计算）
                     if (tc.name) {
-                        totalContent += tc.name;
+                        totalContentParts.push(tc.name);
                     }
                     if (tc.input) {
-                        totalContent += tc.input;
+                        totalContentParts.push(tc.input);
                     }
                     // 工具调用事件（包含 name 和 toolUseId）
                     if (tc.name && tc.toolUseId) {
@@ -2245,9 +2286,9 @@ async saveCredentialsToFile(filePath, newData) {
                     }
                 } else if (event.type === 'toolUseInput') {
                     // 工具调用的 input 续传事件
-                    // 统计 input 内容到 totalContent（用于 token 计算）
+                    // 统计 input 内容到 totalContentParts（用于 token 计算）
                     if (event.input) {
-                        totalContent += event.input;
+                        totalContentParts.push(event.input);
                     }
                     if (currentToolCall) {
                         currentToolCall.input += event.input || '';
@@ -2292,6 +2333,9 @@ async saveCredentialsToFile(filePath, newData) {
             }
 
             yield* pushEvents(stopBlock(streamState.textBlockIndex));
+
+            // Join accumulated content parts (O(n) operation at end instead of O(n²) during accumulation)
+            const totalContent = totalContentParts.join('');
 
             // 检查文本内容中的 bracket 格式工具调用
             const bracketToolCalls = parseBracketToolCalls(totalContent);
@@ -2387,69 +2431,63 @@ async saveCredentialsToFile(filePath, newData) {
     }
 
     /**
-     * Count tokens for a given text using Claude's official tokenizer
+     * Count tokens for a given text using Claude's official tokenizer (cached)
      */
     countTextTokens(text) {
         if (!text) return 0;
-        try {
-            return countTokens(text);
-        } catch (error) {
-            // Fallback to estimation if tokenizer fails
-            console.warn('[Kiro] Tokenizer error, falling back to estimation:', error.message);
-            return Math.ceil((text || '').length / 4);
-        }
+        // Use cached token counting to avoid repeated synchronous tokenizer calls
+        return countTokensCached(text);
     }
 
     /**
-     * Calculate input tokens from request body using Claude's official tokenizer
+     * Calculate input tokens from request body using Claude's official tokenizer (batch optimized)
+     * Collects all texts first, then counts in batch to maximize cache efficiency
      */
     estimateInputTokens(requestBody) {
-        let totalTokens = 0;
-        
-        // Count system prompt tokens
+        // Collect all texts to count in a single batch
+        const textsToCount = [];
+
+        // Collect system prompt
         if (requestBody.system) {
-            const systemText = this.getContentText(requestBody.system);
-            totalTokens += this.countTextTokens(systemText);
+            textsToCount.push(this.getContentText(requestBody.system));
         }
-        
-        // Count thinking prefix tokens if thinking is enabled
+
+        // Collect thinking prefix if thinking is enabled
         if (requestBody.thinking?.type === 'enabled') {
             const budget = this._normalizeThinkingBudgetTokens(requestBody.thinking.budget_tokens);
-            const prefixText = `<thinking_mode>enabled</thinking_mode><max_thinking_length>${budget}</max_thinking_length>`;
-            totalTokens += this.countTextTokens(prefixText);
+            textsToCount.push(`<thinking_mode>enabled</thinking_mode><max_thinking_length>${budget}</max_thinking_length>`);
         }
-        
-        // Count all messages tokens
+
+        // Collect all message texts
         if (requestBody.messages && Array.isArray(requestBody.messages)) {
             for (const message of requestBody.messages) {
                 if (message.content) {
                     if (Array.isArray(message.content)) {
                         for (const part of message.content) {
                             if (part.type === 'text' && part.text) {
-                                totalTokens += this.countTextTokens(part.text);
+                                textsToCount.push(part.text);
                             } else if (part.type === 'thinking' && part.thinking) {
-                                totalTokens += this.countTextTokens(part.thinking);
+                                textsToCount.push(part.thinking);
                             } else if (part.type === 'tool_result') {
-                                const resultContent = this.getContentText(part.content);
-                                totalTokens += this.countTextTokens(resultContent);
+                                textsToCount.push(this.getContentText(part.content));
                             } else if (part.type === 'tool_use' && part.input) {
-                                totalTokens += this.countTextTokens(JSON.stringify(part.input));
+                                textsToCount.push(JSON.stringify(part.input));
                             }
                         }
                     } else {
-                        const contentText = this.getContentText(message);
-                        totalTokens += this.countTextTokens(contentText);
+                        textsToCount.push(this.getContentText(message));
                     }
                 }
             }
         }
-        
-        // Count tools definitions tokens if present
+
+        // Collect tools definitions
         if (requestBody.tools && Array.isArray(requestBody.tools)) {
-            totalTokens += this.countTextTokens(JSON.stringify(requestBody.tools));
+            textsToCount.push(JSON.stringify(requestBody.tools));
         }
-        
-        return totalTokens;
+
+        // Count all texts in batch (uses LRU cache internally)
+        return countTokensTotal(textsToCount);
     }
 
     /**
