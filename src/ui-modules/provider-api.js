@@ -32,15 +32,20 @@ export async function handleGetProviders(req, res, currentConfig, providerPoolMa
     let providerPools = {};
     const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
     try {
-        // Try storage adapter first
-        const adapter = getAdapter();
-        if (adapter) {
-            providerPools = await adapter.getProviderPools();
-        } else if (providerPoolManager && providerPoolManager.providerPools) {
+        // Prioritize in-memory providerPoolManager as it's the most up-to-date source
+        // (especially after delete operations where Redis might have queued writes)
+        // providerPools is an object, so check if it exists (even if empty after all deletions)
+        if (providerPoolManager && providerPoolManager.providerPools !== undefined) {
             providerPools = providerPoolManager.providerPools;
-        } else if (filePath && existsSync(filePath)) {
-            const poolsData = JSON.parse(readFileSync(filePath, 'utf-8'));
-            providerPools = poolsData;
+        } else {
+            // Fall back to storage adapter only if providerPoolManager is not available
+            const adapter = getAdapter();
+            if (adapter) {
+                providerPools = await adapter.getProviderPools();
+            } else if (filePath && existsSync(filePath)) {
+                const poolsData = JSON.parse(readFileSync(filePath, 'utf-8'));
+                providerPools = poolsData;
+            }
         }
     } catch (error) {
         console.warn('[UI API] Failed to load provider pools:', error.message);

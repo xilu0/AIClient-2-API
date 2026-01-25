@@ -135,15 +135,21 @@ class FileStorageAdapter extends StorageAdapter {
         }
         pools[providerType].push(provider);
         this._poolsCache = pools;
-        await this._debouncedSavePools();
+        // Use immediate save for add operations to ensure data consistency
+        await this._forceSavePools();
     }
 
     async deleteProvider(providerType, uuid) {
         const pools = await this.getProviderPools();
         const pool = pools[providerType] || [];
         pools[providerType] = pool.filter(p => p.uuid !== uuid);
+        // Clean up empty provider type
+        if (pools[providerType].length === 0) {
+            delete pools[providerType];
+        }
         this._poolsCache = pools;
-        await this._debouncedSavePools();
+        // Use immediate save for delete operations to ensure data consistency
+        await this._forceSavePools();
     }
 
     // ==================== Atomic Counter Operations ====================
