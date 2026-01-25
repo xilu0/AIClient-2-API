@@ -2,6 +2,7 @@ import { existsSync } from 'fs';
 import { promises as fs } from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { getStorageAdapter, isStorageInitialized } from '../core/storage-factory.js';
 
 // Token存储到本地文件中
 const TOKEN_STORE_FILE = path.join(process.cwd(), 'configs', 'token-store.json');
@@ -12,16 +13,50 @@ const TOKEN_STORE_FILE = path.join(process.cwd(), 'configs', 'token-store.json')
 const DEFAULT_PASSWORD = 'admin123';
 
 /**
- * 读取密码文件内容
- * 如果文件不存在或读取失败，返回默认密码
+ * Check if Redis is enabled via environment variable
+ */
+function isRedisEnabled() {
+    const enabled = process.env.REDIS_ENABLED;
+    return enabled === 'true' || enabled === '1';
+}
+
+/**
+ * 读取密码
+ * 当 Redis 启用时只从 Redis 读取，不 fallback 到文件
+ * 当 Redis 未启用时从文件读取
  */
 export async function readPasswordFile() {
+    // When Redis is enabled, ONLY use Redis (no file fallback)
+    if (isRedisEnabled()) {
+        if (isStorageInitialized()) {
+            try {
+                const adapter = getStorageAdapter();
+                if (adapter.getType() === 'redis') {
+                    const redisPassword = await adapter.getPassword();
+                    if (redisPassword && redisPassword.trim()) {
+                        console.log('[Auth] Successfully read password from Redis');
+                        return redisPassword.trim();
+                    }
+                    // Password not in Redis, use default
+                    console.log('[Auth] Password not found in Redis, using default: ' + DEFAULT_PASSWORD);
+                    return DEFAULT_PASSWORD;
+                }
+            } catch (error) {
+                console.error('[Auth] Failed to read password from Redis:', error.message);
+                console.log('[Auth] Using default password: ' + DEFAULT_PASSWORD);
+                return DEFAULT_PASSWORD;
+            }
+        }
+        // Storage not initialized yet, use default
+        console.log('[Auth] Redis enabled but storage not initialized, using default: ' + DEFAULT_PASSWORD);
+        return DEFAULT_PASSWORD;
+    }
+
+    // Redis not enabled - use file storage
     const pwdFilePath = path.join(process.cwd(), 'configs', 'pwd');
     try {
-        // 使用异步方式检查文件是否存在并读取，避免竞态条件
         const password = await fs.readFile(pwdFilePath, 'utf8');
         const trimmedPassword = password.trim();
-        // 如果密码文件为空，使用默认密码
         if (!trimmedPassword) {
             console.log('[Auth] Password file is empty, using default password: ' + DEFAULT_PASSWORD);
             return DEFAULT_PASSWORD;
@@ -29,7 +64,6 @@ export async function readPasswordFile() {
         console.log('[Auth] Successfully read password file');
         return trimmedPassword;
     } catch (error) {
-        // ENOENT means file does not exist, which is normal
         if (error.code === 'ENOENT') {
             console.log('[Auth] Password file does not exist, using default password: ' + DEFAULT_PASSWORD);
         } else {
@@ -92,16 +126,27 @@ function getExpiryTime() {
 }
 
 /**
- * 读取token存储文件
+ * Check if Redis storage is available for session tokens
  */
-async function readTokenStore() {
+function isRedisAvailable() {
+    if (!isStorageInitialized()) return false;
+    try {
+        const adapter = getStorageAdapter();
+        return adapter.getType() === 'redis';
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * 读取token存储文件 (fallback)
+ */
+async function readTokenStoreFromFile() {
     try {
         if (existsSync(TOKEN_STORE_FILE)) {
             const content = await fs.readFile(TOKEN_STORE_FILE, 'utf8');
             return JSON.parse(content);
         } else {
-            // 如果文件不存在，创建一个默认的token store
-            await writeTokenStore({ tokens: {} });
             return { tokens: {} };
         }
     } catch (error) {
@@ -111,9 +156,9 @@ async function readTokenStore() {
 }
 
 /**
- * 写入token存储文件
+ * 写入token存储文件 (fallback)
  */
-async function writeTokenStore(tokenStore) {
+async function writeTokenStoreToFile(tokenStore) {
     try {
         await fs.writeFile(TOKEN_STORE_FILE, JSON.stringify(tokenStore, null, 2), 'utf8');
     } catch (error) {
@@ -125,38 +170,84 @@ async function writeTokenStore(tokenStore) {
  * 验证简单token
  */
 export async function verifyToken(token) {
-    const tokenStore = await readTokenStore();
+    // Try Redis first
+    if (isRedisAvailable()) {
+        try {
+            const adapter = getStorageAdapter();
+            const tokenInfo = await adapter.getSessionToken(token);
+            if (!tokenInfo) {
+                return null;
+            }
+            // Check if expired
+            if (Date.now() > tokenInfo.expiryTime) {
+                await adapter.deleteSessionToken(token);
+                return null;
+            }
+            return tokenInfo;
+        } catch (error) {
+            console.warn('[Token Store] Redis error, falling back to file:', error.message);
+        }
+    }
+
+    // Fallback to file storage
+    const tokenStore = await readTokenStoreFromFile();
     const tokenInfo = tokenStore.tokens[token];
     if (!tokenInfo) {
         return null;
     }
-    
+
     // 检查是否过期
     if (Date.now() > tokenInfo.expiryTime) {
         await deleteToken(token);
         return null;
     }
-    
+
     return tokenInfo;
 }
 
 /**
- * 保存token到本地文件
+ * 保存token
  */
 async function saveToken(token, tokenInfo) {
-    const tokenStore = await readTokenStore();
+    // Try Redis first
+    if (isRedisAvailable()) {
+        try {
+            const adapter = getStorageAdapter();
+            // Calculate TTL in seconds
+            const ttlSeconds = Math.max(1, Math.floor((tokenInfo.expiryTime - Date.now()) / 1000));
+            await adapter.setSessionToken(token, tokenInfo, ttlSeconds);
+            return;
+        } catch (error) {
+            console.warn('[Token Store] Redis error, falling back to file:', error.message);
+        }
+    }
+
+    // Fallback to file storage
+    const tokenStore = await readTokenStoreFromFile();
     tokenStore.tokens[token] = tokenInfo;
-    await writeTokenStore(tokenStore);
+    await writeTokenStoreToFile(tokenStore);
 }
 
 /**
  * 删除token
  */
 async function deleteToken(token) {
-    const tokenStore = await readTokenStore();
+    // Try Redis first
+    if (isRedisAvailable()) {
+        try {
+            const adapter = getStorageAdapter();
+            await adapter.deleteSessionToken(token);
+            return;
+        } catch (error) {
+            console.warn('[Token Store] Redis error, falling back to file:', error.message);
+        }
+    }
+
+    // Fallback to file storage
+    const tokenStore = await readTokenStoreFromFile();
     if (tokenStore.tokens[token]) {
         delete tokenStore.tokens[token];
-        await writeTokenStore(tokenStore);
+        await writeTokenStoreToFile(tokenStore);
     }
 }
 
@@ -164,19 +255,34 @@ async function deleteToken(token) {
  * 清理过期的token
  */
 export async function cleanupExpiredTokens() {
-    const tokenStore = await readTokenStore();
+    // Try Redis first - Redis handles TTL automatically, but we can clean manually too
+    if (isRedisAvailable()) {
+        try {
+            const adapter = getStorageAdapter();
+            const removed = await adapter.cleanExpiredSessions();
+            if (removed > 0) {
+                console.log(`[Token Store] Cleaned ${removed} expired sessions from Redis`);
+            }
+            return;
+        } catch (error) {
+            console.warn('[Token Store] Redis cleanup error, falling back to file:', error.message);
+        }
+    }
+
+    // Fallback to file storage
+    const tokenStore = await readTokenStoreFromFile();
     const now = Date.now();
     let hasChanges = false;
-    
+
     for (const token in tokenStore.tokens) {
         if (now > tokenStore.tokens[token].expiryTime) {
             delete tokenStore.tokens[token];
             hasChanges = true;
         }
     }
-    
+
     if (hasChanges) {
-        await writeTokenStore(tokenStore);
+        await writeTokenStoreToFile(tokenStore);
     }
 }
 

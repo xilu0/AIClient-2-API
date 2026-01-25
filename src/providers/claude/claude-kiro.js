@@ -12,6 +12,7 @@ import { configureAxiosProxy } from '../../utils/proxy-utils.js';
 import { isRetryableNetworkError, MODEL_PROVIDER, formatExpiryLog } from '../../utils/common.js';
 import { calculateKiroTokenDistribution } from '../../converters/usage/index.js';
 import { getProviderPoolManager } from '../../services/service-manager.js';
+import { getStorageAdapter, isStorageInitialized } from '../../core/storage-factory.js';
 
 const KIRO_THINKING = {
     MAX_BUDGET_TOKENS: 24576,
@@ -461,6 +462,7 @@ export class KiroApiService {
 
 /**
  * 加载凭证信息（不执行刷新）
+ * Tries Redis first, then falls back to file storage
  */
 async loadCredentials() {
     // 获取凭证文件路径
@@ -501,8 +503,34 @@ async loadCredentials() {
         }
     };
 
+    // Helper to load credentials from Redis
+    const loadCredentialsFromRedis = async () => {
+        if (!isStorageInitialized() || !this.uuid) {
+            return null;
+        }
+        try {
+            const adapter = getStorageAdapter();
+            if (adapter.getType() === 'redis') {
+                const token = await adapter.getToken('claude-kiro-oauth', this.uuid);
+                if (token) {
+                    console.info(`[Kiro Auth] Loaded credentials from Redis for ${this.uuid}`);
+                    return token;
+                }
+            }
+        } catch (error) {
+            console.debug(`[Kiro Auth] Failed to load from Redis: ${error.message}`);
+        }
+        return null;
+    };
+
     try {
         let mergedCredentials = {};
+
+        // Priority 0: Try Redis first if available
+        const redisCredentials = await loadCredentialsFromRedis();
+        if (redisCredentials) {
+            Object.assign(mergedCredentials, redisCredentials);
+        }
 
         // Priority 1: Load from Base64 credentials if available
         if (this.base64Creds) {
@@ -511,7 +539,7 @@ async loadCredentials() {
             this.base64Creds = null;
         }
 
-        // 从文件加载
+        // 从文件加载 (if Redis didn't have data or as fallback)
         const targetFilePath = this.credsFilePath || path.join(this.credPath, KIRO_AUTH_TOKEN_FILE);
         const dirPath = path.dirname(targetFilePath);
         const targetFileName = path.basename(targetFilePath);
@@ -597,42 +625,91 @@ async initializeAuth(forceRefresh = false) {
 
 /**
  * Helper to save credentials
+ * Saves to Redis (if available) and file storage for redundancy
  */
 async saveCredentialsToFile(filePath, newData) {
     let existingData = {};
-    try {
-        const fileContent = await fs.readFile(filePath, 'utf8');
+
+    // Try to load existing data from Redis first if available
+    if (isStorageInitialized() && this.uuid) {
         try {
-            existingData = JSON.parse(fileContent);
-        } catch (parseError) {
-            console.warn('[Kiro Auth] JSON parse failed, attempting repair...');
-            try {
-                const repaired = repairJson(fileContent);
-                existingData = JSON.parse(repaired);
-                console.info('[Kiro Auth] JSON repair successful');
-            } catch (repairError) {
-                console.warn('[Kiro Auth] JSON repair failed, attempting field extraction...');
-                const extracted = extractCredentialsFromCorruptedJson(fileContent);
-                if (extracted) {
-                    existingData = extracted;
-                    console.info('[Kiro Auth] Field extraction successful');
-                } else {
-                    console.error('[Kiro Auth] All recovery methods failed:', repairError.message);
-                    existingData = {};
+            const adapter = getStorageAdapter();
+            if (adapter.getType() === 'redis') {
+                const redisToken = await adapter.getToken('claude-kiro-oauth', this.uuid);
+                if (redisToken) {
+                    existingData = redisToken;
+                    console.debug('[Kiro Auth] Loaded existing token data from Redis');
                 }
             }
-        }
-    } catch (readError) {
-        if (readError.code === 'ENOENT') {
-            console.debug(`[Kiro Auth] Token file not found, creating new one: ${filePath}`);
-        } else {
-            console.warn(`[Kiro Auth] Could not read existing token file ${filePath}: ${readError.message}`);
+        } catch (redisError) {
+            console.debug(`[Kiro Auth] Could not load from Redis: ${redisError.message}`);
         }
     }
+
+    // Fall back to file if Redis didn't have data
+    if (Object.keys(existingData).length === 0) {
+        try {
+            const fileContent = await fs.readFile(filePath, 'utf8');
+            try {
+                existingData = JSON.parse(fileContent);
+            } catch (parseError) {
+                console.warn('[Kiro Auth] JSON parse failed, attempting repair...');
+                try {
+                    const repaired = repairJson(fileContent);
+                    existingData = JSON.parse(repaired);
+                    console.info('[Kiro Auth] JSON repair successful');
+                } catch (repairError) {
+                    console.warn('[Kiro Auth] JSON repair failed, attempting field extraction...');
+                    const extracted = extractCredentialsFromCorruptedJson(fileContent);
+                    if (extracted) {
+                        existingData = extracted;
+                        console.info('[Kiro Auth] Field extraction successful');
+                    } else {
+                        console.error('[Kiro Auth] All recovery methods failed:', repairError.message);
+                        existingData = {};
+                    }
+                }
+            }
+        } catch (readError) {
+            if (readError.code === 'ENOENT') {
+                console.debug(`[Kiro Auth] Token file not found, creating new one: ${filePath}`);
+            } else {
+                console.warn(`[Kiro Auth] Could not read existing token file ${filePath}: ${readError.message}`);
+            }
+        }
+    }
+
     const mergedData = { ...existingData, ...newData };
+
+    // Save to Redis if available (with atomic update to prevent concurrent refresh conflicts)
+    if (isStorageInitialized() && this.uuid) {
+        try {
+            const adapter = getStorageAdapter();
+            if (adapter.getType() === 'redis') {
+                // Use atomic update with the old refresh token to detect concurrent refreshes
+                const oldRefreshToken = existingData.refreshToken || '';
+                const result = await adapter.atomicTokenUpdate(
+                    'claude-kiro-oauth',
+                    this.uuid,
+                    mergedData,
+                    oldRefreshToken
+                );
+                if (result.conflict) {
+                    console.warn('[Kiro Auth] Token update conflict - another process already refreshed');
+                    // Return early, don't overwrite file with potentially stale data
+                    return;
+                }
+                console.info(`[Kiro Auth] Token saved to Redis for ${this.uuid}`);
+            }
+        } catch (redisError) {
+            console.warn(`[Kiro Auth] Failed to save to Redis: ${redisError.message}`);
+        }
+    }
+
+    // Always save to file as backup
     await fs.writeFile(filePath, JSON.stringify(mergedData, null, 2), 'utf8');
     console.info(`[Kiro Auth] Updated token file: ${filePath}`);
-};
+}
 
     /**
      * 执行实际的 token 刷新操作（内部方法）

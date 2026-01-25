@@ -11,9 +11,23 @@
 import { promises as fs } from 'fs';
 import { existsSync } from 'fs';
 import path from 'path';
+import { getStorageAdapter, isStorageInitialized } from './storage-factory.js';
 
-// 插件配置文件路径
+// 插件配置文件路径 (fallback)
 const PLUGINS_CONFIG_FILE = path.join(process.cwd(), 'configs', 'plugins.json');
+
+/**
+ * Check if Redis storage is available
+ */
+function isRedisAvailable() {
+    if (!isStorageInitialized()) return false;
+    try {
+        const adapter = getStorageAdapter();
+        return adapter.getType() === 'redis';
+    } catch {
+        return false;
+    }
+}
 
 /**
  * 插件类型常量
@@ -59,9 +73,26 @@ class PluginManager {
     }
 
     /**
-     * 加载插件配置文件
+     * 加载插件配置
+     * 优先从 Redis 读取，fallback 到文件
      */
     async loadConfig() {
+        // Try Redis first
+        if (isRedisAvailable()) {
+            try {
+                const adapter = getStorageAdapter();
+                const config = await adapter.getPlugins();
+                if (config && config.plugins && Object.keys(config.plugins).length > 0) {
+                    this.pluginsConfig = config;
+                    console.log('[PluginManager] Loaded config from Redis');
+                    return;
+                }
+            } catch (error) {
+                console.warn('[PluginManager] Redis error, falling back to file:', error.message);
+            }
+        }
+
+        // Fallback to file
         try {
             if (existsSync(PLUGINS_CONFIG_FILE)) {
                 const content = await fs.readFile(PLUGINS_CONFIG_FILE, 'utf8');
@@ -127,9 +158,23 @@ class PluginManager {
     }
 
     /**
-     * 保存插件配置文件
+     * 保存插件配置
+     * 优先保存到 Redis，fallback 到文件
      */
     async saveConfig() {
+        // Try Redis first
+        if (isRedisAvailable()) {
+            try {
+                const adapter = getStorageAdapter();
+                await adapter.setPlugins(this.pluginsConfig);
+                console.log('[PluginManager] Saved config to Redis');
+                return;
+            } catch (error) {
+                console.warn('[PluginManager] Redis error, falling back to file:', error.message);
+            }
+        }
+
+        // Fallback to file
         try {
             const dir = path.dirname(PLUGINS_CONFIG_FILE);
             if (!existsSync(dir)) {

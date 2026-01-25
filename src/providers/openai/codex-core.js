@@ -6,6 +6,7 @@ import os from 'os';
 import { refreshCodexTokensWithRetry } from '../../auth/oauth-handlers.js';
 import { getProviderPoolManager } from '../../services/service-manager.js';
 import { MODEL_PROVIDER, formatExpiryLog } from '../../utils/common.js';
+import { getStorageAdapter, isStorageInitialized } from '../../core/storage-factory.js';
 
 /**
  * Codex API 服务类
@@ -43,43 +44,68 @@ export class CodexApiService {
 
     /**
      * 加载凭证信息（不执行刷新）
+     * Tries Redis first, then falls back to file storage
      */
     async loadCredentials() {
         const email = this.config.CODEX_EMAIL || 'default';
 
+        // Try loading from Redis first
+        const loadFromRedis = async () => {
+            if (!isStorageInitialized() || !this.uuid) {
+                return null;
+            }
+            try {
+                const adapter = getStorageAdapter();
+                if (adapter.getType() === 'redis') {
+                    const token = await adapter.getToken('openai-codex', this.uuid);
+                    if (token) {
+                        console.info(`[Codex Auth] Loaded credentials from Redis for ${this.uuid}`);
+                        return token;
+                    }
+                }
+            } catch (error) {
+                console.debug(`[Codex Auth] Failed to load from Redis: ${error.message}`);
+            }
+            return null;
+        };
+
         try {
-            let creds;
+            // Try Redis first
+            let creds = await loadFromRedis();
 
-            // 如果指定了具体路径，直接读取
-            if (this.config.CODEX_OAUTH_CREDS_FILE_PATH) {
-                const credsPath = this.config.CODEX_OAUTH_CREDS_FILE_PATH;
-                const exists = await this.fileExists(credsPath);
-                if (!exists) {
-                    throw new Error('Codex credentials not found. Please authenticate first using OAuth.');
+            // Fall back to file storage if Redis didn't have credentials
+            if (!creds) {
+                // 如果指定了具体路径，直接读取
+                if (this.config.CODEX_OAUTH_CREDS_FILE_PATH) {
+                    const credsPath = this.config.CODEX_OAUTH_CREDS_FILE_PATH;
+                    const exists = await this.fileExists(credsPath);
+                    if (!exists) {
+                        throw new Error('Codex credentials not found. Please authenticate first using OAuth.');
+                    }
+                    creds = JSON.parse(await fs.readFile(credsPath, 'utf8'));
+                } else {
+                    // 从 configs/codex 目录扫描加载
+                    const projectDir = process.cwd();
+                    const targetDir = path.join(projectDir, 'configs', 'codex');
+                    const files = await fs.readdir(targetDir);
+                    const matchingFile = files
+                        .filter(f => f.includes(`codex-${email}`) && f.endsWith('.json'))
+                        .sort()
+                        .pop(); // 获取最新的文件
+
+                    if (!matchingFile) {
+                        throw new Error('Codex credentials not found. Please authenticate first using OAuth.');
+                    }
+
+                    const credsPath = path.join(targetDir, matchingFile);
+                    creds = JSON.parse(await fs.readFile(credsPath, 'utf8'));
                 }
-                creds = JSON.parse(await fs.readFile(credsPath, 'utf8'));
-            } else {
-                // 从 configs/codex 目录扫描加载
-                const projectDir = process.cwd();
-                const targetDir = path.join(projectDir, 'configs', 'codex');
-                const files = await fs.readdir(targetDir);
-                const matchingFile = files
-                    .filter(f => f.includes(`codex-${email}`) && f.endsWith('.json'))
-                    .sort()
-                    .pop(); // 获取最新的文件
-
-                if (!matchingFile) {
-                    throw new Error('Codex credentials not found. Please authenticate first using OAuth.');
-                }
-
-                const credsPath = path.join(targetDir, matchingFile);
-                creds = JSON.parse(await fs.readFile(credsPath, 'utf8'));
             }
 
-                this.accessToken = creds.access_token;
-                this.refreshToken = creds.refresh_token;
-                this.accountId = creds.account_id;
-                this.email = creds.email;
+            this.accessToken = creds.access_token;
+            this.refreshToken = creds.refresh_token;
+            this.accountId = creds.account_id;
+            this.email = creds.email;
             this.expiresAt = new Date(creds.expired); // 注意：字段名是 expired
 
             // 检查 token 是否需要刷新
@@ -329,14 +355,10 @@ export class CodexApiService {
     }
 
     /**
-     * 保存凭据
+     * 保存凭据到 Redis 和文件
      */
     async saveCredentials() {
-        const credsPath = this.getCredentialsPath();
-        const credsDir = path.dirname(credsPath);
-
-        await fs.mkdir(credsDir, { recursive: true });
-        await fs.writeFile(credsPath, JSON.stringify({
+        const credentials = {
             id_token: this.idToken || '',
             access_token: this.accessToken,
             refresh_token: this.refreshToken,
@@ -345,7 +367,58 @@ export class CodexApiService {
             email: this.email,
             type: 'codex',
             expired: this.expiresAt.toISOString()
-        }, null, 2), { mode: 0o600 });
+        };
+
+        // Try saving to Redis first
+        const saveToRedis = async () => {
+            if (!isStorageInitialized() || !this.uuid) {
+                return false;
+            }
+            try {
+                const adapter = getStorageAdapter();
+                if (adapter.getType() === 'redis') {
+                    // Calculate TTL based on expiry date
+                    let ttl = 0;
+                    if (this.expiresAt) {
+                        const expiryMs = this.expiresAt.getTime();
+                        ttl = Math.max(0, Math.floor((expiryMs - Date.now()) / 1000) + 3600); // Add 1 hour buffer
+                    }
+
+                    // Use atomic update to prevent concurrent refresh conflicts
+                    if (adapter.atomicTokenUpdate) {
+                        const success = await adapter.atomicTokenUpdate(
+                            'openai-codex',
+                            this.uuid,
+                            credentials,
+                            '', // No expected refresh token comparison
+                            ttl
+                        );
+                        if (success) {
+                            console.info(`[Codex Auth] Credentials saved to Redis atomically for ${this.uuid}`);
+                            return true;
+                        }
+                    } else {
+                        // Fall back to regular setToken
+                        await adapter.setToken('openai-codex', this.uuid, credentials, ttl);
+                        console.info(`[Codex Auth] Credentials saved to Redis for ${this.uuid}`);
+                        return true;
+                    }
+                }
+            } catch (error) {
+                console.warn(`[Codex Auth] Failed to save to Redis: ${error.message}`);
+            }
+            return false;
+        };
+
+        // Save to Redis
+        await saveToRedis();
+
+        // Always save to file as backup
+        const credsPath = this.getCredentialsPath();
+        const credsDir = path.dirname(credsPath);
+
+        await fs.mkdir(credsDir, { recursive: true });
+        await fs.writeFile(credsPath, JSON.stringify(credentials, null, 2), { mode: 0o600 });
     }
 
     /**

@@ -1,0 +1,583 @@
+# Redis Storage Adapter Contract
+# Feature: 001-redis-config
+# Date: 2026-01-25
+
+openapi: 3.0.3
+info:
+  title: Redis Storage Adapter Interface
+  version: 1.0.0
+  description: |
+    Internal interface contract for the Redis-based configuration storage adapter.
+    This defines the methods that RedisConfigManager must implement to replace
+    file-based storage in AIClient-2-API.
+
+# Note: This is not a REST API contract, but a code interface contract
+# expressed in OpenAPI format for documentation purposes.
+
+components:
+  schemas:
+    # ============================================
+    # Core Entities
+    # ============================================
+
+    ServiceConfig:
+      type: object
+      description: Main service configuration (maps to config.json)
+      required:
+        - REQUIRED_API_KEY
+        - SERVER_PORT
+        - MODEL_PROVIDER
+      properties:
+        REQUIRED_API_KEY:
+          type: string
+          description: API key required for client authentication
+        SERVER_PORT:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          default: 3000
+        HOST:
+          type: string
+          default: "0.0.0.0"
+        MODEL_PROVIDER:
+          type: string
+          description: Default provider type
+        SYSTEM_PROMPT_FILE_PATH:
+          type: string
+        PROMPT_LOG_MODE:
+          type: string
+          enum: [none, file, console]
+        REQUEST_MAX_RETRIES:
+          type: integer
+          minimum: 0
+          default: 3
+        providerFallbackChain:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              type: string
+        modelFallbackMapping:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/ModelFallback'
+
+    ModelFallback:
+      type: object
+      properties:
+        targetProvider:
+          type: string
+        targetModel:
+          type: string
+
+    Provider:
+      type: object
+      description: Provider account configuration and runtime state
+      required:
+        - uuid
+      properties:
+        uuid:
+          type: string
+          format: uuid
+        customName:
+          type: string
+        isHealthy:
+          type: boolean
+          default: true
+        isDisabled:
+          type: boolean
+          default: false
+        usageCount:
+          type: integer
+          minimum: 0
+          default: 0
+        errorCount:
+          type: integer
+          minimum: 0
+          default: 0
+        lastUsed:
+          type: string
+          format: date-time
+        lastErrorTime:
+          type: string
+          format: date-time
+        lastHealthCheckTime:
+          type: string
+          format: date-time
+        refreshCount:
+          type: integer
+          minimum: 0
+          default: 0
+        needsRefresh:
+          type: boolean
+          default: false
+        credsFilePath:
+          type: string
+          description: Legacy field for file-based token storage reference
+
+    ProviderPools:
+      type: object
+      description: All provider pools keyed by provider type
+      additionalProperties:
+        type: array
+        items:
+          $ref: '#/components/schemas/Provider'
+
+    TokenCredential:
+      type: object
+      description: OAuth token credentials
+      properties:
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+        tokenType:
+          type: string
+          default: Bearer
+        scope:
+          type: string
+        # Gemini-specific format support
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        expiry_date:
+          type: integer
+          description: Unix timestamp in milliseconds
+
+    ProviderUpdate:
+      type: object
+      description: Partial provider update (any Provider fields)
+      properties:
+        isHealthy:
+          type: boolean
+        isDisabled:
+          type: boolean
+        lastUsed:
+          type: string
+          format: date-time
+        lastErrorTime:
+          type: string
+          format: date-time
+        needsRefresh:
+          type: boolean
+
+    RedisConfig:
+      type: object
+      description: Redis connection configuration
+      properties:
+        enabled:
+          type: boolean
+          default: false
+        url:
+          type: string
+          format: uri
+          example: "redis://localhost:6379"
+        host:
+          type: string
+          default: localhost
+        port:
+          type: integer
+          default: 6379
+        password:
+          type: string
+        db:
+          type: integer
+          minimum: 0
+          maximum: 15
+          default: 0
+        keyPrefix:
+          type: string
+          default: "aiclient:"
+        connectTimeout:
+          type: integer
+          description: Connection timeout in milliseconds
+          default: 5000
+        commandTimeout:
+          type: integer
+          description: Command timeout in milliseconds
+          default: 1000
+
+    ConnectionStatus:
+      type: object
+      properties:
+        connected:
+          type: boolean
+        lastConnectedAt:
+          type: string
+          format: date-time
+        lastErrorAt:
+          type: string
+          format: date-time
+        lastError:
+          type: string
+        queuedWrites:
+          type: integer
+          description: Number of pending writes in queue
+
+    MigrationResult:
+      type: object
+      properties:
+        success:
+          type: boolean
+        providersImported:
+          type: integer
+        tokensImported:
+          type: integer
+        configImported:
+          type: boolean
+        errors:
+          type: array
+          items:
+            type: string
+
+# ============================================
+# Interface Methods (expressed as paths)
+# ============================================
+
+paths:
+  /config:
+    get:
+      operationId: getConfig
+      summary: Get service configuration
+      description: Returns the full service configuration object
+      responses:
+        '200':
+          description: Service configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceConfig'
+    put:
+      operationId: setConfig
+      summary: Set service configuration
+      description: Replaces the entire service configuration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceConfig'
+      responses:
+        '200':
+          description: Configuration saved
+
+  /pools:
+    get:
+      operationId: getProviderPools
+      summary: Get all provider pools
+      description: Returns all provider pools with runtime state
+      responses:
+        '200':
+          description: Provider pools
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderPools'
+
+  /pools/{providerType}:
+    get:
+      operationId: getProviderPool
+      summary: Get single provider pool
+      parameters:
+        - name: providerType
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Provider pool
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Provider'
+    put:
+      operationId: setProviderPool
+      summary: Replace provider pool
+      parameters:
+        - name: providerType
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '#/components/schemas/Provider'
+      responses:
+        '200':
+          description: Pool saved
+
+  /pools/{providerType}/{uuid}:
+    get:
+      operationId: getProvider
+      summary: Get single provider
+      parameters:
+        - name: providerType
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Provider
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Provider'
+    patch:
+      operationId: updateProvider
+      summary: Partial update provider
+      parameters:
+        - name: providerType
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProviderUpdate'
+      responses:
+        '200':
+          description: Provider updated
+    delete:
+      operationId: deleteProvider
+      summary: Delete provider
+      parameters:
+        - name: providerType
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Provider deleted
+
+  /pools/{providerType}/{uuid}/usage:
+    post:
+      operationId: incrementUsage
+      summary: Atomically increment usage counter
+      description: |
+        Increments usageCount by 1 and updates lastUsed timestamp.
+        This operation is atomic and safe for concurrent access.
+      parameters:
+        - name: providerType
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Counter incremented
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  usageCount:
+                    type: integer
+
+  /pools/{providerType}/{uuid}/error:
+    post:
+      operationId: incrementError
+      summary: Atomically increment error counter
+      description: |
+        Increments errorCount by 1, updates lastErrorTime,
+        and optionally sets isHealthy to false.
+      parameters:
+        - name: providerType
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                markUnhealthy:
+                  type: boolean
+                  default: false
+      responses:
+        '200':
+          description: Error recorded
+
+  /tokens/{providerType}/{uuid}:
+    get:
+      operationId: getToken
+      summary: Get token credentials
+      parameters:
+        - name: providerType
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Token credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenCredential'
+    put:
+      operationId: setToken
+      summary: Set token credentials
+      description: Atomically replaces token credentials
+      parameters:
+        - name: providerType
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: uuid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TokenCredential'
+      responses:
+        '200':
+          description: Token saved
+
+  /pwd:
+    get:
+      operationId: getPassword
+      summary: Get UI password
+      responses:
+        '200':
+          description: Password
+          content:
+            text/plain:
+              schema:
+                type: string
+    put:
+      operationId: setPassword
+      summary: Set UI password
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema:
+              type: string
+      responses:
+        '200':
+          description: Password saved
+
+  /status:
+    get:
+      operationId: getConnectionStatus
+      summary: Get Redis connection status
+      responses:
+        '200':
+          description: Connection status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectionStatus'
+
+  /migrate:
+    post:
+      operationId: migrateFromFiles
+      summary: Import configuration from files to Redis
+      description: |
+        Imports existing file-based configuration into Redis.
+        This operation is idempotent - running it multiple times
+        produces the same result.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                configDir:
+                  type: string
+                  description: Path to configs directory
+                  default: "./configs"
+      responses:
+        '200':
+          description: Migration result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MigrationResult'
+
+  /export:
+    post:
+      operationId: exportToFiles
+      summary: Export Redis configuration to files
+      description: |
+        Exports current Redis configuration state to files
+        for backup or recovery purposes.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                outputDir:
+                  type: string
+                  description: Path to output directory
+                  default: "./configs"
+      responses:
+        '200':
+          description: Export result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MigrationResult'

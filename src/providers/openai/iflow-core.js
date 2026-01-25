@@ -25,6 +25,7 @@ import * as os from 'os';
 import { configureAxiosProxy } from '../../utils/proxy-utils.js';
 import { isRetryableNetworkError, MODEL_PROVIDER, formatExpiryLog } from '../../utils/common.js';
 import { getProviderPoolManager } from '../../services/service-manager.js';
+import { getStorageAdapter, isStorageInitialized } from '../../core/storage-factory.js';
 
 // iFlow API 端点
 const IFLOW_API_BASE_URL = 'https://apis.iflow.cn/v1';
@@ -128,11 +129,69 @@ async function loadTokenFromFile(filePath) {
 }
 
 /**
- * 保存 Token 到文件
+ * 保存 Token 到文件和 Redis
  * @param {string} filePath - Token 文件路径
  * @param {IFlowTokenStorage} tokenStorage - Token 存储对象
+ * @param {string} uuid - Provider UUID for Redis storage
  */
 async function saveTokenToFile(filePath, tokenStorage, uuid = null) {
+    const json = tokenStorage.toJSON();
+
+    // 验证关键字段是否存在
+    if (!json.refresh_token || json.refresh_token.trim() === '') {
+        console.error('[iFlow] WARNING: Attempting to save token with empty refresh_token!');
+    }
+    if (!json.apiKey || json.apiKey.trim() === '') {
+        console.error('[iFlow] WARNING: Attempting to save token with empty apiKey!');
+    }
+
+    // Try saving to Redis first
+    const saveToRedis = async () => {
+        if (!isStorageInitialized() || !uuid) {
+            return false;
+        }
+        try {
+            const adapter = getStorageAdapter();
+            if (adapter.getType() === 'redis') {
+                // Calculate TTL based on expiry_date if available
+                let ttl = 0;
+                if (json.expiry_date) {
+                    const expiryMs = typeof json.expiry_date === 'number'
+                        ? json.expiry_date
+                        : new Date(json.expiry_date).getTime();
+                    ttl = Math.max(0, Math.floor((expiryMs - Date.now()) / 1000) + 3600); // Add 1 hour buffer
+                }
+
+                // Use atomic update to prevent concurrent refresh conflicts
+                if (adapter.atomicTokenUpdate) {
+                    const success = await adapter.atomicTokenUpdate(
+                        'openai-iflow',
+                        uuid,
+                        json,
+                        '', // No expected refresh token comparison for iFlow
+                        ttl
+                    );
+                    if (success) {
+                        console.info(`[iFlow Auth] Credentials saved to Redis atomically for ${uuid}`);
+                        return true;
+                    }
+                } else {
+                    // Fall back to regular setToken
+                    await adapter.setToken('openai-iflow', uuid, json, ttl);
+                    console.info(`[iFlow Auth] Credentials saved to Redis for ${uuid}`);
+                    return true;
+                }
+            }
+        } catch (error) {
+            console.warn(`[iFlow Auth] Failed to save to Redis: ${error.message}`);
+        }
+        return false;
+    };
+
+    // Save to Redis
+    await saveToRedis();
+
+    // Always save to file as backup
     const absolutePath = path.isAbsolute(filePath)
         ? filePath
         : path.join(process.cwd(), filePath);
@@ -141,17 +200,6 @@ async function saveTokenToFile(filePath, tokenStorage, uuid = null) {
         // 确保目录存在
         const dir = path.dirname(absolutePath);
         await fs.mkdir(dir, { recursive: true });
-
-        // 写入文件
-        const json = tokenStorage.toJSON();
-
-        // 验证关键字段是否存在
-        if (!json.refresh_token || json.refresh_token.trim() === '') {
-            console.error('[iFlow] WARNING: Attempting to save token file with empty refresh_token!');
-        }
-        if (!json.apiKey || json.apiKey.trim() === '') {
-            console.error('[iFlow] WARNING: Attempting to save token file with empty apiKey!');
-        }
 
         await fs.writeFile(absolutePath, JSON.stringify(json, null, 2), 'utf-8');
 
@@ -504,10 +552,40 @@ export class IFlowApiService {
 
     /**
      * 加载凭证信息（不执行刷新）
+     * Tries Redis first, then falls back to file storage
      */
     async loadCredentials() {
+        // Try loading from Redis first
+        const loadFromRedis = async () => {
+            if (!isStorageInitialized() || !this.uuid) {
+                return null;
+            }
+            try {
+                const adapter = getStorageAdapter();
+                if (adapter.getType() === 'redis') {
+                    const token = await adapter.getToken('openai-iflow', this.uuid);
+                    if (token) {
+                        console.info(`[iFlow Auth] Loaded credentials from Redis for ${this.uuid}`);
+                        return IFlowTokenStorage.fromJSON(token);
+                    }
+                }
+            } catch (error) {
+                console.debug(`[iFlow Auth] Failed to load from Redis: ${error.message}`);
+            }
+            return null;
+        };
+
+        // Try Redis first
+        const redisToken = await loadFromRedis();
+        if (redisToken && redisToken.apiKey) {
+            this.tokenStorage = redisToken;
+            this.apiKey = redisToken.apiKey;
+            this.axiosInstance.defaults.headers['Authorization'] = `Bearer ${this.apiKey}`;
+            return;
+        }
+
+        // Fall back to file storage
         try {
-            // 从文件加载
             this.tokenStorage = await loadTokenFromFile(this.tokenFilePath);
             if (this.tokenStorage && this.tokenStorage.apiKey) {
                 this.apiKey = this.tokenStorage.apiKey;

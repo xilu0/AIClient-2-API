@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import { promises as pfs } from 'fs';
 import { INPUT_SYSTEM_PROMPT_FILE, MODEL_PROVIDER } from '../utils/common.js';
+import { getStorageAdapter, isStorageInitialized } from './storage-factory.js';
 
 export let CONFIG = {}; // Make CONFIG exportable
 export let PROMPT_LOG_FILENAME = ''; // Make PROMPT_LOG_FILENAME exportable
@@ -80,7 +81,19 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
             CRON_REFRESH_TOKEN: false,
             PROVIDER_POOLS_FILE_PATH: null, // 新增号池配置文件路径
             MAX_ERROR_COUNT: 10, // 提供商最大错误次数
-            providerFallbackChain: {} // 跨类型 Fallback 链配置
+            providerFallbackChain: {}, // 跨类型 Fallback 链配置
+            // Redis configuration
+            redis: {
+                enabled: false,
+                url: null,
+                host: 'localhost',
+                port: 6379,
+                password: null,
+                db: 0,
+                keyPrefix: 'aiclient:',
+                connectTimeout: 5000,
+                commandTimeout: 1000
+            }
         };
         console.log('[Config] Using default configuration.');
     }
@@ -184,6 +197,9 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
         }
     }
 
+    // Initialize Redis configuration from environment variables
+    initializeRedisConfig(currentConfig);
+
     normalizeConfiguredProviders(currentConfig);
 
     if (!currentConfig.SYSTEM_PROMPT_FILE_PATH) {
@@ -253,5 +269,176 @@ export async function getSystemPromptFileContent(filePath) {
     }
 }
 
-export { ALL_MODEL_PROVIDERS };
+/**
+ * Initialize Redis configuration from environment variables.
+ * Environment variables take precedence over config file values.
+ * @param {Object} config - Configuration object to update
+ */
+function initializeRedisConfig(config) {
+    // Ensure redis config object exists
+    if (!config.redis) {
+        config.redis = {};
+    }
+
+    // REDIS_ENABLED - enable/disable Redis storage
+    if (process.env.REDIS_ENABLED !== undefined) {
+        config.redis.enabled = process.env.REDIS_ENABLED.toLowerCase() === 'true';
+    }
+
+    // REDIS_URL - full Redis URL (overrides host/port)
+    if (process.env.REDIS_URL) {
+        config.redis.url = process.env.REDIS_URL;
+        config.redis.enabled = true; // Auto-enable if URL is provided
+    }
+
+    // REDIS_HOST - Redis server host
+    if (process.env.REDIS_HOST) {
+        config.redis.host = process.env.REDIS_HOST;
+    }
+
+    // REDIS_PORT - Redis server port
+    if (process.env.REDIS_PORT) {
+        config.redis.port = parseInt(process.env.REDIS_PORT, 10);
+    }
+
+    // REDIS_PASSWORD - Redis authentication password
+    if (process.env.REDIS_PASSWORD) {
+        config.redis.password = process.env.REDIS_PASSWORD;
+    }
+
+    // REDIS_DB - Redis database number (0-15)
+    if (process.env.REDIS_DB) {
+        config.redis.db = parseInt(process.env.REDIS_DB, 10);
+    }
+
+    // Set defaults for any missing values
+    config.redis.host = config.redis.host || 'localhost';
+    config.redis.port = config.redis.port || 6379;
+    config.redis.db = config.redis.db || 0;
+    config.redis.keyPrefix = config.redis.keyPrefix || 'aiclient:';
+    config.redis.connectTimeout = config.redis.connectTimeout || 5000;
+    config.redis.commandTimeout = config.redis.commandTimeout || 1000;
+
+    if (config.redis.enabled) {
+        console.log(`[Config] Redis storage enabled: ${config.redis.url || `${config.redis.host}:${config.redis.port}`}`);
+    }
+}
+
+/**
+ * Try to load configuration from Redis storage.
+ * This should be called after Redis is initialized to sync config from Redis.
+ * Falls back to current CONFIG if Redis is not available or has no config.
+ * @returns {Promise<Object|null>} Config from Redis or null if not available
+ */
+export async function loadConfigFromRedis() {
+    if (!isStorageInitialized()) {
+        return null;
+    }
+
+    try {
+        const adapter = getStorageAdapter();
+        if (adapter.getType() !== 'redis') {
+            return null;
+        }
+
+        const redisConfig = await adapter.getConfig();
+        if (redisConfig && Object.keys(redisConfig).length > 0) {
+            console.log('[Config] Loaded configuration from Redis');
+            return redisConfig;
+        }
+    } catch (error) {
+        console.warn('[Config] Failed to load config from Redis:', error.message);
+    }
+
+    return null;
+}
+
+/**
+ * Save current configuration to Redis storage.
+ * This should be called after config changes to sync to Redis.
+ * @param {Object} [config] - Config to save, defaults to current CONFIG
+ * @returns {Promise<boolean>} Whether save was successful
+ */
+export async function saveConfigToRedis(config = CONFIG) {
+    if (!isStorageInitialized()) {
+        return false;
+    }
+
+    try {
+        const adapter = getStorageAdapter();
+        if (adapter.getType() !== 'redis') {
+            return false;
+        }
+
+        // Create a clean config object for saving (exclude runtime-only properties)
+        const configToSave = {
+            REQUIRED_API_KEY: config.REQUIRED_API_KEY,
+            SERVER_PORT: config.SERVER_PORT,
+            HOST: config.HOST,
+            MODEL_PROVIDER: config.MODEL_PROVIDER,
+            SYSTEM_PROMPT_FILE_PATH: config.SYSTEM_PROMPT_FILE_PATH,
+            SYSTEM_PROMPT_MODE: config.SYSTEM_PROMPT_MODE,
+            PROMPT_LOG_BASE_NAME: config.PROMPT_LOG_BASE_NAME,
+            PROMPT_LOG_MODE: config.PROMPT_LOG_MODE,
+            REQUEST_MAX_RETRIES: config.REQUEST_MAX_RETRIES,
+            REQUEST_BASE_DELAY: config.REQUEST_BASE_DELAY,
+            CREDENTIAL_SWITCH_MAX_RETRIES: config.CREDENTIAL_SWITCH_MAX_RETRIES,
+            CRON_NEAR_MINUTES: config.CRON_NEAR_MINUTES,
+            CRON_REFRESH_TOKEN: config.CRON_REFRESH_TOKEN,
+            PROVIDER_POOLS_FILE_PATH: config.PROVIDER_POOLS_FILE_PATH,
+            MAX_ERROR_COUNT: config.MAX_ERROR_COUNT,
+            POOL_SIZE_LIMIT: config.POOL_SIZE_LIMIT,
+            WARMUP_TARGET: config.WARMUP_TARGET,
+            REFRESH_CONCURRENCY_PER_PROVIDER: config.REFRESH_CONCURRENCY_PER_PROVIDER,
+            providerFallbackChain: config.providerFallbackChain,
+            modelFallbackMapping: config.modelFallbackMapping,
+            PROXY_URL: config.PROXY_URL,
+            PROXY_ENABLED_PROVIDERS: config.PROXY_ENABLED_PROVIDERS,
+            redis: config.redis
+        };
+
+        await adapter.setConfig(configToSave);
+        console.log('[Config] Configuration saved to Redis');
+        return true;
+    } catch (error) {
+        console.warn('[Config] Failed to save config to Redis:', error.message);
+        return false;
+    }
+}
+
+/**
+ * Sync configuration between Redis and file storage.
+ * Called after Redis connection is established.
+ * @returns {Promise<void>}
+ */
+export async function syncConfigWithRedis() {
+    if (!isStorageInitialized()) {
+        return;
+    }
+
+    try {
+        const adapter = getStorageAdapter();
+        if (adapter.getType() !== 'redis') {
+            return;
+        }
+
+        // Check if Redis has config
+        const redisConfig = await adapter.getConfig();
+
+        if (!redisConfig || Object.keys(redisConfig).length === 0) {
+            // Redis is empty, push current config to Redis
+            console.log('[Config] Redis config is empty, syncing from file config');
+            await saveConfigToRedis(CONFIG);
+        } else {
+            // Redis has config, merge any missing fields from current CONFIG
+            const merged = { ...CONFIG, ...redisConfig };
+            Object.assign(CONFIG, merged);
+            console.log('[Config] Synced configuration from Redis');
+        }
+    } catch (error) {
+        console.warn('[Config] Failed to sync config with Redis:', error.message);
+    }
+}
+
+export { ALL_MODEL_PROVIDERS, initializeRedisConfig };
 

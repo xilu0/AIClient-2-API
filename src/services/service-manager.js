@@ -12,9 +12,42 @@ import {
     getFileName,
     formatSystemPath
 } from '../utils/provider-utils.js';
+import { createStorageAdapter, getStorageAdapter, isStorageInitialized } from '../core/storage-factory.js';
 
 // 存储 ProviderPoolManager 实例
 let providerPoolManager = null;
+
+// Storage adapter instance
+let storageAdapter = null;
+
+/**
+ * Initialize the storage adapter (Redis or File based on config).
+ * This should be called early in the startup sequence.
+ * @param {Object} config - The server configuration
+ * @returns {Promise<import('../core/storage-adapter.js').StorageAdapter>}
+ */
+export async function initializeStorageAdapter(config) {
+    if (storageAdapter) {
+        return storageAdapter;
+    }
+
+    storageAdapter = await createStorageAdapter({
+        redis: config.redis,
+        configPath: 'configs/config.json',
+        poolsPath: config.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json',
+    });
+
+    console.log(`[Storage] Initialized storage adapter: ${storageAdapter.getType()}`);
+    return storageAdapter;
+}
+
+/**
+ * Get the current storage adapter instance.
+ * @returns {import('../core/storage-adapter.js').StorageAdapter|null}
+ */
+export function getStorageAdapterInstance() {
+    return storageAdapter;
+}
 
 /**
  * 扫描 configs 目录并自动关联未关联的配置文件到对应的提供商
@@ -166,6 +199,23 @@ async function scanProviderDirectory(dirPath, linkedPaths, newProviders, options
  * @returns {Promise<Object>} The initialized services
  */
 export async function initApiService(config, isReady = false) {
+
+    // If provider pools from file is empty but Redis is enabled, try to load from Redis
+    if ((!config.providerPools || Object.keys(config.providerPools).length === 0) &&
+        isStorageInitialized()) {
+        const adapter = getStorageAdapter();
+        if (adapter && adapter.getType() === 'redis') {
+            try {
+                const redisPools = await adapter.getProviderPools();
+                if (redisPools && Object.keys(redisPools).length > 0) {
+                    config.providerPools = redisPools;
+                    console.log(`[Initialization] Loaded ${Object.keys(redisPools).length} provider pool types from Redis storage`);
+                }
+            } catch (error) {
+                console.error(`[Initialization] Failed to load provider pools from Redis: ${error.message}`);
+            }
+        }
+    }
 
     if (config.providerPools && Object.keys(config.providerPools).length > 0) {
         providerPoolManager = new ProviderPoolManager(config.providerPools, {

@@ -1,6 +1,6 @@
 import * as http from 'http';
 import { initializeConfig, CONFIG } from '../core/config-manager.js';
-import { initApiService, autoLinkProviderConfigs } from './service-manager.js';
+import { initApiService, autoLinkProviderConfigs, initializeStorageAdapter } from './service-manager.js';
 import { initializeUIManagement } from './ui-manager.js';
 import { initializeAPIManagement } from './api-manager.js';
 import { createRequestHandler } from '../handlers/request-handler.js';
@@ -240,6 +240,9 @@ async function startServer() {
             console.log(`  ${status} ${p.name} v${p.version} - ${p.description}`);
         });
     }
+
+    // Initialize storage adapter (Redis or File based on config)
+    await initializeStorageAdapter(CONFIG);
 
     // Initialize API services
     const services = await initApiService(CONFIG, true);

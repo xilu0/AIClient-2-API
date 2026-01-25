@@ -4,6 +4,7 @@ import { getServiceAdapter } from './adapter.js';
 import { MODEL_PROVIDER, getProtocolPrefix } from '../utils/common.js';
 import { getProviderModels } from './provider-models.js';
 import axios from 'axios';
+import { getStorageAdapter, isStorageInitialized } from '../core/storage-factory.js';
 
 /**
  * Manages a pool of API service providers, handling their health and selection.
@@ -54,10 +55,13 @@ export class ProviderPoolManager {
         
         // 文件写入锁，防止并发读写冲突
         this._fileLock = false;
-        
+
         // 异步写入队列，避免阻塞API请求
         this._writeQueue = [];
         this._isProcessingQueue = false;
+
+        // Storage adapter reference (lazy initialized)
+        this._storageAdapter = null;
 
         // --- V2: 读写分离 and 异步刷新队列 ---
         // 刷新并发控制配置
@@ -469,6 +473,40 @@ export class ProviderPoolManager {
     }
 
     /**
+     * Get the storage adapter (lazy initialization)
+     * @returns {import('../core/storage-adapter.js').StorageAdapter|null}
+     * @private
+     */
+    _getStorageAdapter() {
+        if (this._storageAdapter) {
+            return this._storageAdapter;
+        }
+        if (isStorageInitialized()) {
+            this._storageAdapter = getStorageAdapter();
+            return this._storageAdapter;
+        }
+        return null;
+    }
+
+    /**
+     * Check if Redis storage is being used
+     * @returns {boolean}
+     */
+    isUsingRedis() {
+        const adapter = this._getStorageAdapter();
+        return adapter && adapter.getType() === 'redis';
+    }
+
+    /**
+     * Set the storage adapter (for dependency injection)
+     * @param {import('../core/storage-adapter.js').StorageAdapter} adapter
+     */
+    setStorageAdapter(adapter) {
+        this._storageAdapter = adapter;
+        this._log('info', `Storage adapter set: ${adapter.getType()}`);
+    }
+
+    /**
      * 查找指定的 provider
      * @private
      */
@@ -479,6 +517,79 @@ export class ProviderPoolManager {
         }
         const pool = this.providerStatus[providerType];
         return pool?.find(p => p.uuid === uuid) || null;
+    }
+
+    /**
+     * Load provider pools from storage adapter
+     * @returns {Promise<Object>} Provider pools data
+     */
+    async loadProviderPoolsFromStorage() {
+        const adapter = this._getStorageAdapter();
+        if (adapter) {
+            try {
+                const pools = await adapter.getProviderPools();
+                if (pools && Object.keys(pools).length > 0) {
+                    this._log('info', `Loaded provider pools from ${adapter.getType()} storage`);
+                    return pools;
+                }
+            } catch (error) {
+                this._log('error', `Failed to load from storage adapter: ${error.message}`);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Reload provider pools from storage and reinitialize
+     * @returns {Promise<boolean>} Whether reload was successful
+     */
+    async reloadFromStorage() {
+        const pools = await this.loadProviderPoolsFromStorage();
+        if (pools) {
+            this.providerPools = pools;
+            this.initializeProviderStatus();
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Sync current state to storage adapter (useful for initial migration)
+     * @returns {Promise<void>}
+     */
+    async syncToStorage() {
+        const adapter = this._getStorageAdapter();
+        if (!adapter) {
+            this._log('warn', 'No storage adapter available for sync');
+            return;
+        }
+
+        try {
+            // Build pools from current status
+            const pools = {};
+            for (const providerType in this.providerStatus) {
+                pools[providerType] = this.providerStatus[providerType].map(p => {
+                    const config = { ...p.config };
+                    // Convert Date objects to ISOString
+                    if (config.lastUsed instanceof Date) {
+                        config.lastUsed = config.lastUsed.toISOString();
+                    }
+                    if (config.lastErrorTime instanceof Date) {
+                        config.lastErrorTime = config.lastErrorTime.toISOString();
+                    }
+                    if (config.lastHealthCheckTime instanceof Date) {
+                        config.lastHealthCheckTime = config.lastHealthCheckTime.toISOString();
+                    }
+                    return config;
+                });
+            }
+
+            await adapter.saveAllProviderPools(pools);
+            this._log('info', `Synced all provider pools to ${adapter.getType()} storage`);
+        } catch (error) {
+            this._log('error', `Failed to sync to storage: ${error.message}`);
+            throw error;
+        }
     }
 
     /**
@@ -624,9 +735,17 @@ export class ProviderPoolManager {
 
         if (!options.skipUsageCount) {
             selected.config.usageCount++;
-            // 只有在使用次数达到一定阈值时才保存，减少I/O频率
-            if (selected.config.usageCount % 50 === 0) {
-                this._debouncedSave(providerType);
+            // Use Redis atomic increment if available, otherwise use debounced file save
+            if (this.isUsingRedis()) {
+                // Atomic Redis update - fire and forget for performance
+                this._incrementUsageAtomic(providerType, selected.config.uuid).catch(err => {
+                    this._log('error', `Async usage increment failed: ${err.message}`);
+                });
+            } else {
+                // 只有在使用次数达到一定阈值时才保存，减少I/O频率
+                if (selected.config.usageCount % 50 === 0) {
+                    this._debouncedSave(providerType);
+                }
             }
         }
 
@@ -857,6 +976,7 @@ export class ProviderPoolManager {
 
     /**
      * 标记提供商需要刷新并推入刷新队列
+     * Uses Redis atomic operations when available.
      * @param {string} providerType - 提供商类型
      * @param {object} providerConfig - 提供商配置（包含 uuid）
      */
@@ -870,16 +990,26 @@ export class ProviderPoolManager {
         if (provider) {
             provider.config.needsRefresh = true;
             this._log('info', `Marked provider ${providerConfig.uuid} as needsRefresh. Enqueuing...`);
-            
+
             // 推入异步刷新队列
             this._enqueueRefresh(providerType, provider, true);
-            
-            this._debouncedSave(providerType);
+
+            // Use Redis atomic operations if available
+            if (this.isUsingRedis()) {
+                this._persistProviderUpdate(providerType, providerConfig.uuid, {
+                    needsRefresh: true
+                }).catch(err => {
+                    this._log('error', `Async provider update failed: ${err.message}`);
+                });
+            } else {
+                this._debouncedSave(providerType);
+            }
         }
     }
 
     /**
      * Marks a provider as unhealthy (e.g., after an API error).
+     * Uses Redis atomic operations when available for concurrent safety.
      * @param {string} providerType - The type of the provider.
      * @param {object} providerConfig - The configuration of the provider to mark.
      * @param {string} [errorMessage] - Optional error message to store.
@@ -912,20 +1042,38 @@ export class ProviderPoolManager {
                 provider.config.lastErrorMessage = errorMessage;
             }
 
-            if (provider.config.errorCount >= this.maxErrorCount) {
+            const shouldMarkUnhealthy = provider.config.errorCount >= this.maxErrorCount;
+            if (shouldMarkUnhealthy) {
                 provider.config.isHealthy = false;
                 this._log('warn', `Marked provider as unhealthy: ${providerConfig.uuid} for type ${providerType}. Total errors: ${provider.config.errorCount}`);
             } else {
                 this._log('warn', `Provider ${providerConfig.uuid} for type ${providerType} error count: ${provider.config.errorCount}/${this.maxErrorCount}. Still healthy.`);
             }
 
-            this._debouncedSave(providerType);
+            // Use Redis atomic operations if available
+            if (this.isUsingRedis()) {
+                this._incrementErrorAtomic(providerType, providerConfig.uuid, shouldMarkUnhealthy).catch(err => {
+                    this._log('error', `Async error increment failed: ${err.message}`);
+                });
+                // Also persist the error message if provided
+                if (errorMessage) {
+                    this._persistProviderUpdate(providerType, providerConfig.uuid, {
+                        lastErrorMessage: errorMessage,
+                        lastUsed: provider.config.lastUsed
+                    }).catch(err => {
+                        this._log('error', `Async error message update failed: ${err.message}`);
+                    });
+                }
+            } else {
+                this._debouncedSave(providerType);
+            }
         }
     }
 
     /**
      * Marks a provider as unhealthy immediately (without accumulating error count).
      * Used for definitive authentication errors like 401/403.
+     * Uses Redis atomic operations when available.
      * @param {string} providerType - The type of the provider.
      * @param {object} providerConfig - The configuration of the provider to mark.
      * @param {string} [errorMessage] - Optional error message to store.
@@ -948,14 +1096,30 @@ export class ProviderPoolManager {
             }
 
             this._log('warn', `Immediately marked provider as unhealthy: ${providerConfig.uuid} for type ${providerType}. Reason: ${errorMessage || 'Authentication error'}`);
-           
-            this._debouncedSave(providerType);
+
+            // Use Redis atomic operations if available
+            if (this.isUsingRedis()) {
+                this._updateHealthStatusAtomic(providerType, providerConfig.uuid, false).catch(err => {
+                    this._log('error', `Async health status update failed: ${err.message}`);
+                });
+                this._persistProviderUpdate(providerType, providerConfig.uuid, {
+                    errorCount: this.maxErrorCount,
+                    lastErrorTime: provider.config.lastErrorTime,
+                    lastUsed: provider.config.lastUsed,
+                    lastErrorMessage: errorMessage
+                }).catch(err => {
+                    this._log('error', `Async provider update failed: ${err.message}`);
+                });
+            } else {
+                this._debouncedSave(providerType);
+            }
         }
     }
 
     /**
      * Marks a provider as unhealthy with a scheduled recovery time.
      * Used for quota exhaustion errors (402) where the quota will reset at a specific time.
+     * Uses Redis atomic operations when available.
      * @param {string} providerType - The type of the provider.
      * @param {object} providerConfig - The configuration of the provider to mark.
      * @param {string} [errorMessage] - Optional error message to store.
@@ -979,20 +1143,40 @@ export class ProviderPoolManager {
             }
 
             // Set recovery time if provided
+            let recoveryDateStr = null;
             if (recoveryTime) {
                 const recoveryDate = recoveryTime instanceof Date ? recoveryTime : new Date(recoveryTime);
                 provider.config.scheduledRecoveryTime = recoveryDate.toISOString();
-                this._log('warn', `Marked provider as unhealthy with recovery time: ${providerConfig.uuid} for type ${providerType}. Recovery at: ${recoveryDate.toISOString()}. Reason: ${errorMessage || 'Quota exhausted'}`);
+                recoveryDateStr = recoveryDate.toISOString();
+                this._log('warn', `Marked provider as unhealthy with recovery time: ${providerConfig.uuid} for type ${providerType}. Recovery at: ${recoveryDateStr}. Reason: ${errorMessage || 'Quota exhausted'}`);
             } else {
                 this._log('warn', `Marked provider as unhealthy: ${providerConfig.uuid} for type ${providerType}. Reason: ${errorMessage || 'Quota exhausted'}`);
             }
 
-            this._debouncedSave(providerType);
+            // Use Redis atomic operations if available
+            if (this.isUsingRedis()) {
+                const updates = {
+                    isHealthy: false,
+                    errorCount: this.maxErrorCount,
+                    lastErrorTime: provider.config.lastErrorTime,
+                    lastUsed: provider.config.lastUsed,
+                    lastErrorMessage: errorMessage
+                };
+                if (recoveryDateStr) {
+                    updates.scheduledRecoveryTime = recoveryDateStr;
+                }
+                this._persistProviderUpdate(providerType, providerConfig.uuid, updates).catch(err => {
+                    this._log('error', `Async provider update failed: ${err.message}`);
+                });
+            } else {
+                this._debouncedSave(providerType);
+            }
         }
     }
 
     /**
      * Marks a provider as healthy.
+     * Uses Redis atomic operations when available.
      * @param {string} providerType - The type of the provider.
      * @param {object} providerConfig - The configuration of the provider to mark.
      * @param {boolean} resetUsageCount - Whether to reset usage count (optional, default: false).
@@ -1012,29 +1196,55 @@ export class ProviderPoolManager {
             provider.config.needsRefresh = false;
             provider.config.lastErrorTime = null;
             provider.config.lastErrorMessage = null;
-            
+
             // 更新健康检测信息
             provider.config.lastHealthCheckTime = new Date().toISOString();
             if (healthCheckModel) {
                 provider.config.lastHealthCheckModel = healthCheckModel;
             }
-            
+
             // 只有在明确要求重置使用计数时才重置
             if (resetUsageCount) {
                 provider.config.usageCount = 0;
-            }else{
+            } else {
                 provider.config.usageCount++;
                 provider.config.lastUsed = new Date().toISOString();
             }
             this._log('info', `Marked provider as healthy: ${provider.config.uuid} for type ${providerType}${resetUsageCount ? ' (usage count reset)' : ''}`);
-            
-            this._debouncedSave(providerType);
+
+            // Use Redis atomic operations if available
+            if (this.isUsingRedis()) {
+                this._updateHealthStatusAtomic(providerType, providerConfig.uuid, true).catch(err => {
+                    this._log('error', `Async health status update failed: ${err.message}`);
+                });
+                const updates = {
+                    errorCount: 0,
+                    refreshCount: 0,
+                    needsRefresh: false,
+                    lastErrorTime: null,
+                    lastErrorMessage: null,
+                    lastHealthCheckTime: provider.config.lastHealthCheckTime,
+                    usageCount: provider.config.usageCount
+                };
+                if (healthCheckModel) {
+                    updates.lastHealthCheckModel = healthCheckModel;
+                }
+                if (!resetUsageCount) {
+                    updates.lastUsed = provider.config.lastUsed;
+                }
+                this._persistProviderUpdate(providerType, providerConfig.uuid, updates).catch(err => {
+                    this._log('error', `Async provider update failed: ${err.message}`);
+                });
+            } else {
+                this._debouncedSave(providerType);
+            }
         }
     }
 
     /**
      * 重置提供商的刷新状态（needsRefresh 和 refreshCount）
      * 并将其标记为健康，以便立即投入使用
+     * Uses Redis atomic operations when available.
      * @param {string} providerType - 提供商类型
      * @param {string} uuid - 提供商 UUID
      */
@@ -1053,12 +1263,24 @@ export class ProviderPoolManager {
             // 标记为健康，以便立即投入使用
             this._log('info', `Reset refresh status and marked healthy for provider ${uuid} (${providerType})`);
 
-            this._debouncedSave(providerType);
+            // Use Redis atomic operations if available
+            if (this.isUsingRedis()) {
+                this._persistProviderUpdate(providerType, uuid, {
+                    needsRefresh: false,
+                    refreshCount: 0,
+                    lastHealthCheckTime: provider.config.lastHealthCheckTime
+                }).catch(err => {
+                    this._log('error', `Async provider update failed: ${err.message}`);
+                });
+            } else {
+                this._debouncedSave(providerType);
+            }
         }
     }
 
     /**
      * 重置提供商的计数器（错误计数和使用计数）
+     * Uses Redis atomic operations when available.
      * @param {string} providerType - The type of the provider.
      * @param {object} providerConfig - The configuration of the provider to mark.
      */
@@ -1073,13 +1295,24 @@ export class ProviderPoolManager {
             provider.config.errorCount = 0;
             provider.config.usageCount = 0;
             this._log('info', `Reset provider counters: ${provider.config.uuid} for type ${providerType}`);
-            
-            this._debouncedSave(providerType);
+
+            // Use Redis atomic operations if available
+            if (this.isUsingRedis()) {
+                this._persistProviderUpdate(providerType, providerConfig.uuid, {
+                    errorCount: 0,
+                    usageCount: 0
+                }).catch(err => {
+                    this._log('error', `Async provider update failed: ${err.message}`);
+                });
+            } else {
+                this._debouncedSave(providerType);
+            }
         }
     }
 
     /**
      * 禁用指定提供商
+     * Uses Redis atomic operations when available.
      * @param {string} providerType - 提供商类型
      * @param {object} providerConfig - 提供商配置
      */
@@ -1093,12 +1326,23 @@ export class ProviderPoolManager {
         if (provider) {
             provider.config.isDisabled = true;
             this._log('info', `Disabled provider: ${providerConfig.uuid} for type ${providerType}`);
-            this._debouncedSave(providerType);
+
+            // Use Redis atomic operations if available
+            if (this.isUsingRedis()) {
+                this._persistProviderUpdate(providerType, providerConfig.uuid, {
+                    isDisabled: true
+                }).catch(err => {
+                    this._log('error', `Async provider update failed: ${err.message}`);
+                });
+            } else {
+                this._debouncedSave(providerType);
+            }
         }
     }
 
     /**
      * 启用指定提供商
+     * Uses Redis atomic operations when available.
      * @param {string} providerType - 提供商类型
      * @param {object} providerConfig - 提供商配置
      */
@@ -1112,13 +1356,24 @@ export class ProviderPoolManager {
         if (provider) {
             provider.config.isDisabled = false;
             this._log('info', `Enabled provider: ${providerConfig.uuid} for type ${providerType}`);
-            this._debouncedSave(providerType);
+
+            // Use Redis atomic operations if available
+            if (this.isUsingRedis()) {
+                this._persistProviderUpdate(providerType, providerConfig.uuid, {
+                    isDisabled: false
+                }).catch(err => {
+                    this._log('error', `Async provider update failed: ${err.message}`);
+                });
+            } else {
+                this._debouncedSave(providerType);
+            }
         }
     }
 
     /**
      * 刷新指定提供商的 UUID
      * 用于在认证错误（如 401）时更换 UUID，以便重新尝试
+     * Note: For Redis, this requires deleting the old key and adding a new one.
      * @param {string} providerType - 提供商类型
      * @param {object} providerConfig - 提供商配置（包含当前 uuid）
      * @returns {string|null} 新的 UUID，如果失败则返回 null
@@ -1138,11 +1393,11 @@ export class ProviderPoolManager {
                 const v = c === 'x' ? r : (r & 0x3 | 0x8);
                 return v.toString(16);
             });
-            
+
             // 更新 provider 的 UUID
             provider.uuid = newUuid;
             provider.config.uuid = newUuid;
-            
+
             // 同时更新 providerPools 中的原始数据
             const poolArray = this.providerPools[providerType];
             if (poolArray) {
@@ -1151,13 +1406,26 @@ export class ProviderPoolManager {
                     originalProvider.uuid = newUuid;
                 }
             }
-            
+
             this._log('info', `Refreshed provider UUID: ${oldUuid} -> ${newUuid} for type ${providerType}`);
-            this._debouncedSave(providerType);
-            
+
+            // For Redis, we need to delete the old key and add a new one
+            if (this.isUsingRedis()) {
+                const adapter = this._getStorageAdapter();
+                // Delete old entry and add new one atomically
+                Promise.all([
+                    adapter.deleteProvider(providerType, oldUuid),
+                    adapter.addProvider(providerType, provider.config)
+                ]).catch(err => {
+                    this._log('error', `Async UUID refresh failed: ${err.message}`);
+                });
+            } else {
+                this._debouncedSave(providerType);
+            }
+
             return newUuid;
         }
-        
+
         this._log('warn', `Provider not found for UUID refresh: ${providerConfig.uuid} in ${providerType}`);
         return null;
     }
@@ -1393,35 +1661,156 @@ export class ProviderPoolManager {
     /**
      * 优化1: 添加防抖保存方法
      * 延迟保存操作，避免频繁的文件 I/O
+     * When using Redis, individual field updates are immediate (atomic),
+     * but full pool syncs still use debouncing.
      * @private
      */
     _debouncedSave(providerType) {
         // 将待保存的 providerType 添加到集合中
         this.pendingSaves.add(providerType);
-        
+
         // 清除之前的定时器
         if (this.saveTimer) {
             clearTimeout(this.saveTimer);
         }
-        
+
         // 设置新的定时器
         this.saveTimer = setTimeout(() => {
             this._flushPendingSaves();
         }, this.saveDebounceTime);
     }
+
+    /**
+     * Persist a single provider update to Redis immediately (atomic operation)
+     * Falls back to debounced file save if Redis is not available
+     * @param {string} providerType - Provider type
+     * @param {string} uuid - Provider UUID
+     * @param {Object} updates - Fields to update
+     * @private
+     */
+    async _persistProviderUpdate(providerType, uuid, updates) {
+        const adapter = this._getStorageAdapter();
+        if (adapter && adapter.getType() === 'redis') {
+            try {
+                await adapter.updateProvider(providerType, uuid, updates);
+                this._log('debug', `Redis atomic update: ${providerType}:${uuid}`);
+            } catch (error) {
+                this._log('error', `Redis update failed, falling back to file: ${error.message}`);
+                this._debouncedSave(providerType);
+            }
+        } else {
+            // Fall back to debounced file save
+            this._debouncedSave(providerType);
+        }
+    }
+
+    /**
+     * Increment usage count atomically in Redis
+     * @param {string} providerType - Provider type
+     * @param {string} uuid - Provider UUID
+     * @returns {Promise<number>} New usage count
+     * @private
+     */
+    async _incrementUsageAtomic(providerType, uuid) {
+        const adapter = this._getStorageAdapter();
+        if (adapter && adapter.getType() === 'redis') {
+            try {
+                const newCount = await adapter.incrementUsage(providerType, uuid);
+                this._log('debug', `Redis atomic usage increment: ${providerType}:${uuid} -> ${newCount}`);
+                return newCount;
+            } catch (error) {
+                this._log('error', `Redis usage increment failed: ${error.message}`);
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * Increment error count atomically in Redis
+     * @param {string} providerType - Provider type
+     * @param {string} uuid - Provider UUID
+     * @param {boolean} markUnhealthy - Whether to mark as unhealthy
+     * @returns {Promise<number>} New error count
+     * @private
+     */
+    async _incrementErrorAtomic(providerType, uuid, markUnhealthy = false) {
+        const adapter = this._getStorageAdapter();
+        if (adapter && adapter.getType() === 'redis') {
+            try {
+                const newCount = await adapter.incrementError(providerType, uuid, markUnhealthy);
+                this._log('debug', `Redis atomic error increment: ${providerType}:${uuid} -> ${newCount}`);
+                return newCount;
+            } catch (error) {
+                this._log('error', `Redis error increment failed: ${error.message}`);
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * Update health status atomically in Redis
+     * @param {string} providerType - Provider type
+     * @param {string} uuid - Provider UUID
+     * @param {boolean} isHealthy - Health status
+     * @private
+     */
+    async _updateHealthStatusAtomic(providerType, uuid, isHealthy) {
+        const adapter = this._getStorageAdapter();
+        if (adapter && adapter.getType() === 'redis') {
+            try {
+                await adapter.updateHealthStatus(providerType, uuid, isHealthy);
+                this._log('debug', `Redis atomic health update: ${providerType}:${uuid} -> ${isHealthy}`);
+            } catch (error) {
+                this._log('error', `Redis health update failed: ${error.message}`);
+            }
+        }
+    }
     
     /**
      * 批量保存所有待保存的 providerType（优化为单次文件写入）
+     * When using Redis, syncs the entire pool to Redis storage.
      * @private
      */
     async _flushPendingSaves() {
         const typesToSave = Array.from(this.pendingSaves);
         if (typesToSave.length === 0) return;
-        
+
         // 清空待保存列表，避免重复处理
         this.pendingSaves.clear();
         this.saveTimer = null;
-        
+
+        // Check if we should use Redis storage
+        const adapter = this._getStorageAdapter();
+        if (adapter && adapter.getType() === 'redis') {
+            try {
+                // Sync all pending types to Redis
+                for (const providerType of typesToSave) {
+                    if (this.providerStatus[providerType]) {
+                        const providers = this.providerStatus[providerType].map(p => {
+                            const config = { ...p.config };
+                            // Convert Date objects to ISOString
+                            if (config.lastUsed instanceof Date) {
+                                config.lastUsed = config.lastUsed.toISOString();
+                            }
+                            if (config.lastErrorTime instanceof Date) {
+                                config.lastErrorTime = config.lastErrorTime.toISOString();
+                            }
+                            if (config.lastHealthCheckTime instanceof Date) {
+                                config.lastHealthCheckTime = config.lastHealthCheckTime.toISOString();
+                            }
+                            return config;
+                        });
+                        await adapter.setProviderPool(providerType, providers);
+                    }
+                }
+                this._log('debug', `Redis pool sync completed for: ${typesToSave.join(', ')}`);
+                return;
+            } catch (error) {
+                this._log('error', `Redis pool sync failed, falling back to file: ${error.message}`);
+                // Fall through to file-based save
+            }
+        }
+
         // 使用异步队列，避免阻塞API请求
         return new Promise((resolve) => {
             this._writeQueue.push({ typesToSave, resolve });

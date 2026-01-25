@@ -13,6 +13,7 @@ import { handleQwenOAuth } from '../../auth/oauth-handlers.js';
 import { configureAxiosProxy } from '../../utils/proxy-utils.js';
 import { isRetryableNetworkError, MODEL_PROVIDER, formatExpiryLog } from '../../utils/common.js';
 import { getProviderPoolManager } from '../../services/service-manager.js';
+import { getStorageAdapter, isStorageInitialized } from '../../core/storage-factory.js';
 
 // --- Constants ---
 const QWEN_DIR = '.qwen';
@@ -178,7 +179,7 @@ export class QwenApiService {
         this.isInitialized = false;
         this.sharedManager = SharedTokenManager.getInstance();
         this.currentAxiosInstance = null;
-        this.tokenManagerOptions = { credentialFilePath: this._getQwenCachedCredentialPath() };
+        this.tokenManagerOptions = { credentialFilePath: this._getQwenCachedCredentialPath(), uuid: this.uuid };
         this.useSystemProxy = config?.USE_SYSTEM_PROXY_QWEN ?? false;
         this.uuid = config.uuid; // 保存 uuid 用于号池管理
         
@@ -239,8 +240,37 @@ export class QwenApiService {
 
     /**
      * 加载凭证信息（不执行刷新）
+     * Tries Redis first, then falls back to file storage
      */
     async loadCredentials() {
+        // Try loading from Redis first
+        const loadFromRedis = async () => {
+            if (!isStorageInitialized() || !this.uuid) {
+                return null;
+            }
+            try {
+                const adapter = getStorageAdapter();
+                if (adapter.getType() === 'redis') {
+                    const token = await adapter.getToken('openai-qwen-oauth', this.uuid);
+                    if (token) {
+                        console.info(`[Qwen Auth] Loaded credentials from Redis for ${this.uuid}`);
+                        return token;
+                    }
+                }
+            } catch (error) {
+                console.debug(`[Qwen Auth] Failed to load from Redis: ${error.message}`);
+            }
+            return null;
+        };
+
+        // Try Redis first
+        const redisCredentials = await loadFromRedis();
+        if (redisCredentials) {
+            this.qwenClient.setCredentials(redisCredentials);
+            return;
+        }
+
+        // Fall back to file storage
         try {
             const keyFile = this._getQwenCachedCredentialPath();
             const creds = await fs.readFile(keyFile, 'utf-8');
@@ -755,11 +785,16 @@ class SharedTokenManager {
                 lockConfig: options.lockConfig || DEFAULT_LOCK_CONFIG,
                 memoryCache: { credentials: null, fileModTime: 0, lastCheck: 0 },
                 refreshPromise: null,
+                uuid: options.uuid || null, // Store uuid for Redis operations
             };
             this.contexts.set(credentialFilePath, context);
             this.lockPaths.add(lockFilePath);
         } else if (options.lockConfig) {
             context.lockConfig = options.lockConfig;
+        }
+        // Always update uuid if provided (in case service was recreated with new uuid)
+        if (options.uuid) {
+            context.uuid = options.uuid;
         }
         return context;
     }
@@ -889,7 +924,7 @@ class SharedTokenManager {
 
                 context.memoryCache.credentials = newCredentials;
                 qwenClient.setCredentials(newCredentials);
-                await this.saveCredentialsToFile(context, newCredentials);
+                await this.saveCredentialsToFile(context, newCredentials, context.uuid);
                 console.log('[Qwen Auth] Token refresh response: ok');
                 return newCredentials;
             } finally {
@@ -919,7 +954,58 @@ class SharedTokenManager {
         }
     }
     
-    async saveCredentialsToFile(context, credentials) {
+    async saveCredentialsToFile(context, credentials, uuid = null) {
+        // Try saving to Redis first
+        const saveToRedis = async () => {
+            if (!isStorageInitialized() || !uuid) {
+                return false;
+            }
+            try {
+                const adapter = getStorageAdapter();
+                if (adapter.getType() === 'redis') {
+                    // Calculate TTL based on expiry_date if available
+                    let ttl = 0;
+                    if (credentials.expiry_date) {
+                        const expiryMs = typeof credentials.expiry_date === 'number'
+                            ? credentials.expiry_date
+                            : new Date(credentials.expiry_date).getTime();
+                        ttl = Math.max(0, Math.floor((expiryMs - Date.now()) / 1000) + 3600); // Add 1 hour buffer
+                    }
+
+                    // Use atomic update to prevent concurrent refresh conflicts
+                    if (adapter.atomicTokenUpdate) {
+                        const expectedRefreshToken = context.memoryCache?.credentials?.refresh_token || '';
+                        const success = await adapter.atomicTokenUpdate(
+                            'openai-qwen-oauth',
+                            uuid,
+                            credentials,
+                            expectedRefreshToken,
+                            ttl
+                        );
+                        if (success) {
+                            console.info(`[Qwen Auth] Credentials saved to Redis atomically for ${uuid}`);
+                            return true;
+                        } else {
+                            console.warn(`[Qwen Auth] Atomic update detected conflict, another process may have refreshed`);
+                            return false;
+                        }
+                    } else {
+                        // Fall back to regular setToken
+                        await adapter.setToken('openai-qwen-oauth', uuid, credentials, ttl);
+                        console.info(`[Qwen Auth] Credentials saved to Redis for ${uuid}`);
+                        return true;
+                    }
+                }
+            } catch (error) {
+                console.warn(`[Qwen Auth] Failed to save to Redis: ${error.message}`);
+            }
+            return false;
+        };
+
+        // Save to Redis
+        await saveToRedis();
+
+        // Always save to file as backup
         try {
             await fs.mkdir(path.dirname(context.credentialFilePath), { recursive: true, mode: 0o700 });
             await fs.writeFile(context.credentialFilePath, JSON.stringify(credentials, null, 2), { mode: 0o600 });

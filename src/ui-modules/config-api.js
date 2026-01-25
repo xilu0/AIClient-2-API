@@ -1,11 +1,12 @@
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import { promises as fs } from 'fs';
 import path from 'path';
-import { CONFIG } from '../core/config-manager.js';
+import { CONFIG, saveConfigToRedis } from '../core/config-manager.js';
 import { serviceInstances } from '../providers/adapter.js';
 import { initApiService } from '../services/service-manager.js';
 import { getRequestBody } from '../utils/common.js';
 import { broadcastEvent } from '../ui-modules/event-broadcast.js';
+import { getStorageAdapter, isStorageInitialized } from '../core/storage-factory.js';
 
 /**
  * 重载配置文件
@@ -150,7 +151,12 @@ export async function handleUpdateConfig(req, res, currentConfig) {
 
             writeFileSync(configPath, JSON.stringify(configToSave, null, 2), 'utf-8');
             console.log('[UI API] Configuration saved to configs/config.json');
-            
+
+            // Also save to Redis if available (non-blocking)
+            saveConfigToRedis(currentConfig).catch(err => {
+                console.warn('[UI API] Failed to sync config to Redis:', err.message);
+            });
+
             // 广播更新事件
             broadcastEvent('config_update', {
                 action: 'update',
@@ -247,7 +253,20 @@ export async function handleUpdateAdminPassword(req, res) {
         // 写入密码到 pwd 文件
         const pwdFilePath = path.join(process.cwd(), 'configs', 'pwd');
         await fs.writeFile(pwdFilePath, password.trim(), 'utf-8');
-        
+
+        // Also save to Redis if available (non-blocking)
+        if (isStorageInitialized()) {
+            try {
+                const adapter = getStorageAdapter();
+                if (adapter.getType() === 'redis') {
+                    await adapter.setPassword(password.trim());
+                    console.log('[UI API] Admin password also saved to Redis');
+                }
+            } catch (err) {
+                console.warn('[UI API] Failed to save password to Redis:', err.message);
+            }
+        }
+
         console.log('[UI API] Admin password updated successfully');
 
         res.writeHead(200, { 'Content-Type': 'application/json' });

@@ -12,6 +12,7 @@ import * as systemApi from '../ui-modules/system-api.js';
 import * as updateApi from '../ui-modules/update-api.js';
 import * as oauthApi from '../ui-modules/oauth-api.js';
 import * as eventBroadcast from '../ui-modules/event-broadcast.js';
+import * as healthApi from '../ui-modules/health-api.js';
 
 // Re-export from event-broadcast module
 export { broadcastEvent, initializeUIManagement, handleUploadOAuthCredentials, upload } from '../ui-modules/event-broadcast.js';
@@ -288,6 +289,16 @@ export async function handleUIApiRequests(method, pathParam, req, res, currentCo
     // Get service mode information
     if (method === 'GET' && pathParam === '/api/service-mode') {
         return await systemApi.handleGetServiceMode(req, res);
+    }
+
+    // Get Redis status
+    if (method === 'GET' && pathParam === '/api/redis/status') {
+        return await healthApi.handleGetRedisStatus(req, res);
+    }
+
+    // Get storage adapter status
+    if (method === 'GET' && pathParam === '/api/storage/status') {
+        return await healthApi.handleGetStorageStatus(req, res);
     }
 
     // Batch import Kiro refresh tokens with SSE (real-time progress)

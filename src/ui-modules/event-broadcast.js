@@ -3,12 +3,6 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import multer from 'multer';
 
-// Token存储到本地文件中
-const TOKEN_STORE_FILE = path.join(process.cwd(), 'configs', 'token-store.json');
-
-// 用量缓存文件路径
-const USAGE_CACHE_FILE = path.join(process.cwd(), 'configs', 'usage-cache.json');
-
 /**
  * Helper function to broadcast events to UI clients
  * @param {string} eventType - The type of event
