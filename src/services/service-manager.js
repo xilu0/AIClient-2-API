@@ -59,25 +59,31 @@ export async function autoLinkProviderConfigs(config) {
     if (!config.providerPools) {
         config.providerPools = {};
     }
-    
+
     let totalNewProviders = 0;
     const allNewProviders = {};
-    
+
     // 遍历所有提供商映射
     for (const mapping of PROVIDER_MAPPINGS) {
         const configsPath = path.join(process.cwd(), 'configs', mapping.dirName);
         const { providerType, credPathKey, defaultCheckModel, displayName, needsProjectId } = mapping;
-        
+
+        // 跳过 claude-kiro-oauth：该类型通过 OAuth 流程直接存储到 Redis
+        if (providerType === 'claude-kiro-oauth') {
+            console.log('[Auto-Link] Skipping claude-kiro-oauth (uses Redis directly via OAuth flow)');
+            continue;
+        }
+
         // 确保提供商类型数组存在
         if (!config.providerPools[providerType]) {
             config.providerPools[providerType] = [];
         }
-        
+
         // 检查目录是否存在
         if (!fs.existsSync(configsPath)) {
             continue;
         }
-        
+
         // 获取已关联的配置文件路径集合
         const linkedPaths = new Set();
         for (const provider of config.providerPools[providerType]) {
@@ -86,7 +92,7 @@ export async function autoLinkProviderConfigs(config) {
                 addToUsedPaths(linkedPaths, provider[credPathKey]);
             }
         }
-        
+
         // 递归扫描目录
         const newProviders = [];
         await scanProviderDirectory(configsPath, linkedPaths, newProviders, {
@@ -94,7 +100,7 @@ export async function autoLinkProviderConfigs(config) {
             defaultCheckModel,
             needsProjectId
         });
-        
+
         // 如果有新的配置文件需要关联
         if (newProviders.length > 0) {
             config.providerPools[providerType].push(...newProviders);
@@ -102,13 +108,28 @@ export async function autoLinkProviderConfigs(config) {
             allNewProviders[displayName] = newProviders;
         }
     }
-    
-    // 如果有新的配置文件需要关联，保存更新后的 provider_pools.json
+
+    // 如果有新的配置文件需要关联，保存到 Redis
     if (totalNewProviders > 0) {
-        const filePath = config.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
         try {
-            await pfs.writeFile(filePath, JSON.stringify(config.providerPools, null, 2), 'utf8');
-            console.log(`[Auto-Link] Added ${totalNewProviders} new config(s) to provider pools:`);
+            // 使用 Redis 存储适配器保存
+            if (isStorageInitialized()) {
+                const storage = getStorageAdapter();
+                // 为每个新 provider 添加到 Redis
+                for (const [displayName, providers] of Object.entries(allNewProviders)) {
+                    // 找到对应的 providerType
+                    const mapping = PROVIDER_MAPPINGS.find(m => m.displayName === displayName);
+                    if (mapping) {
+                        for (const provider of providers) {
+                            await storage.addProvider(mapping.providerType, provider);
+                        }
+                    }
+                }
+                console.log(`[Auto-Link] Added ${totalNewProviders} new config(s) to Redis provider pools:`);
+            } else {
+                console.warn('[Auto-Link] Storage not initialized, skipping Redis save');
+            }
+
             for (const [displayName, providers] of Object.entries(allNewProviders)) {
                 console.log(`  ${displayName}: ${providers.length} config(s)`);
                 providers.forEach(p => {
@@ -122,12 +143,12 @@ export async function autoLinkProviderConfigs(config) {
                 });
             }
         } catch (error) {
-            console.error(`[Auto-Link] Failed to save provider_pools.json: ${error.message}`);
+            console.error(`[Auto-Link] Failed to save to Redis: ${error.message}`);
         }
     } else {
         console.log('[Auto-Link] No new configs to link');
     }
-    
+
     // Update provider pool manager if available
     if (providerPoolManager) {
         providerPoolManager.providerPools = config.providerPools;

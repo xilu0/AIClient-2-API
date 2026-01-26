@@ -4,9 +4,11 @@ import path from 'path';
 import crypto from 'crypto';
 import os from 'os';
 import { broadcastEvent } from '../services/ui-manager.js';
-import { autoLinkProviderConfigs } from '../services/service-manager.js';
+import { autoLinkProviderConfigs, getProviderPoolManager } from '../services/service-manager.js';
 import { CONFIG } from '../core/config-manager.js';
 import { getProxyConfigForProvider } from '../utils/proxy-utils.js';
+import { getStorageAdapter, isStorageInitialized } from '../core/storage-factory.js';
+import { v4 as uuidv4 } from 'uuid';
 
 /**
  * Kiro OAuth 配置（支持多种认证方式）
@@ -55,6 +57,89 @@ const activeKiroServers = new Map();
  * 活动的 Kiro 轮询任务管理（用于 Builder ID Device Code）
  */
 const activeKiroPollingTasks = new Map();
+
+/**
+ * 保存 Kiro OAuth Token 到 Redis 并创建 Provider 条目
+ * @param {Object} tokenData - Token 数据对象
+ * @param {string} [tokenData.accessToken] - 访问令牌
+ * @param {string} tokenData.refreshToken - 刷新令牌
+ * @param {string} [tokenData.expiresAt] - 过期时间
+ * @param {string} [tokenData.authMethod] - 认证方法 ('social' | 'builder-id')
+ * @param {string} [tokenData.region] - AWS 区域
+ * @param {Object} options - 可选配置
+ * @param {boolean} [options.skipDuplicateCheck=false] - 是否跳过重复检查
+ * @returns {Promise<{success: boolean, uuid?: string, duplicate?: boolean, existingUuid?: string, error?: string}>}
+ */
+async function saveKiroTokenToRedis(tokenData, options = {}) {
+    const providerType = 'claude-kiro-oauth';
+
+    if (!isStorageInitialized()) {
+        console.error(`${KIRO_OAUTH_CONFIG.logPrefix} Storage not initialized`);
+        return { success: false, error: 'Storage not initialized' };
+    }
+
+    try {
+        const storage = getStorageAdapter();
+
+        // 检查重复（如果未跳过）
+        if (!options.skipDuplicateCheck && tokenData.refreshToken) {
+            const duplicateCheck = await storage.checkKiroRefreshTokenExists(tokenData.refreshToken);
+            if (duplicateCheck.isDuplicate) {
+                console.log(`${KIRO_OAUTH_CONFIG.logPrefix} Duplicate refreshToken detected, existing UUID: ${duplicateCheck.existingUuid}`);
+                return {
+                    success: false,
+                    duplicate: true,
+                    existingUuid: duplicateCheck.existingUuid
+                };
+            }
+        }
+
+        // 生成新 UUID
+        const uuid = uuidv4();
+
+        // 保存 token 到 Redis
+        const result = await storage.setKiroToken(uuid, tokenData);
+        if (!result.success) {
+            if (result.duplicate) {
+                return {
+                    success: false,
+                    duplicate: true,
+                    existingUuid: result.existingUuid
+                };
+            }
+            return { success: false, error: 'Failed to store token in Redis' };
+        }
+
+        // 创建 provider 条目
+        const provider = {
+            uuid,
+            KIRO_TOKEN_FILE_PATH: `redis:tokens:${providerType}:${uuid}`,
+            checkModel: 'kiro',
+            isHealthy: true,
+            usageCount: 0,
+            errorCount: 0,
+            addedAt: new Date().toISOString()
+        };
+
+        await storage.addProvider(providerType, provider);
+        console.log(`${KIRO_OAUTH_CONFIG.logPrefix} Token saved to Redis, UUID: ${uuid}`);
+
+        // 更新 providerPoolManager 的内存状态
+        const poolManager = getProviderPoolManager();
+        if (poolManager) {
+            // 从 Redis 重新加载 provider pools
+            const pools = await storage.getProviderPools();
+            poolManager.providerPools = pools;
+            poolManager.initializeProviderStatus();
+            console.log(`${KIRO_OAUTH_CONFIG.logPrefix} Provider pool manager updated with new provider`);
+        }
+
+        return { success: true, uuid };
+    } catch (error) {
+        console.error(`${KIRO_OAUTH_CONFIG.logPrefix} Failed to save token to Redis:`, error.message);
+        return { success: false, error: error.message };
+    }
+}
 
 /**
  * 创建带代理支持的 fetch 请求
@@ -378,16 +463,7 @@ async function pollKiroBuilderIDToken(clientId, clientSecret, deviceCode, interv
             
             if (response.ok && data.accessToken) {
                 console.log(`${KIRO_OAUTH_CONFIG.logPrefix} 成功获取令牌 [${taskId}]`);
-                
-                // 保存令牌（符合现有规范）
-                if (options.saveToConfigs) {
-                    const timestamp = Date.now();
-                    const folderName = `${timestamp}_kiro-auth-token`;
-                    const targetDir = path.join(process.cwd(), 'configs', 'kiro', folderName);
-                    await fs.promises.mkdir(targetDir, { recursive: true });
-                    credPath = path.join(targetDir, `${folderName}.json`);
-                }
-                
+
                 const tokenData = {
                     accessToken: data.accessToken,
                     refreshToken: data.refreshToken,
@@ -397,23 +473,31 @@ async function pollKiroBuilderIDToken(clientId, clientSecret, deviceCode, interv
                     clientSecret,
                     idcRegion: options.region || 'us-east-1'
                 };
-                
-                await fs.promises.mkdir(path.dirname(credPath), { recursive: true });
-                await fs.promises.writeFile(credPath, JSON.stringify(tokenData, null, 2));
-                
+
+                // 保存令牌到 Redis（内部会检查重复并创建 provider 条目）
+                const saveResult = await saveKiroTokenToRedis(tokenData, { skipDuplicateCheck: false });
+
+                if (!saveResult.success) {
+                    activeKiroPollingTasks.delete(taskId);
+                    if (saveResult.duplicate) {
+                        console.log(`${KIRO_OAUTH_CONFIG.logPrefix} Token already exists, UUID: ${saveResult.existingUuid}`);
+                        // 返回 tokenData，因为 OAuth 本身成功了
+                        return tokenData;
+                    }
+                    throw new Error(saveResult.error || 'Failed to save token to Redis');
+                }
+
                 activeKiroPollingTasks.delete(taskId);
-                
-                // 广播成功事件（符合现有规范）
+
+                // 广播成功事件
                 broadcastEvent('oauth_success', {
                     provider: 'claude-kiro-oauth',
-                    credPath,
-                    relativePath: path.relative(process.cwd(), credPath),
+                    uuid: saveResult.uuid,
                     timestamp: new Date().toISOString()
                 });
-                
-                // 自动关联新生成的凭据到 Pools
-                await autoLinkProviderConfigs(CONFIG);
-                
+
+                // 不再需要调用 autoLinkProviderConfigs，provider 条目已在 saveKiroTokenToRedis 中创建
+
                 return tokenData;
             }
             
@@ -558,18 +642,7 @@ function createKiroHttpCallbackServer(port, codeVerifier, expectedState, options
                     }
                     
                     const tokenData = await tokenResponse.json();
-                    
-                    // 保存令牌
-                    let credPath = path.join(os.homedir(), KIRO_OAUTH_CONFIG.credentialsDir, KIRO_OAUTH_CONFIG.credentialsFile);
-                    
-                    if (options.saveToConfigs) {
-                        const timestamp = Date.now();
-                        const folderName = `${timestamp}_kiro-auth-token`;
-                        const targetDir = path.join(process.cwd(), 'configs', 'kiro', folderName);
-                        await fs.promises.mkdir(targetDir, { recursive: true });
-                        credPath = path.join(targetDir, `${folderName}.json`);
-                    }
-                    
+
                     const saveData = {
                         accessToken: tokenData.accessToken,
                         refreshToken: tokenData.refreshToken,
@@ -578,23 +651,33 @@ function createKiroHttpCallbackServer(port, codeVerifier, expectedState, options
                         authMethod: 'social',
                         region: 'us-east-1'
                     };
-                    
-                    await fs.promises.mkdir(path.dirname(credPath), { recursive: true });
-                    await fs.promises.writeFile(credPath, JSON.stringify(saveData, null, 2));
-                    
-                    console.log(`${KIRO_OAUTH_CONFIG.logPrefix} 令牌已保存: ${credPath}`);
-                    
+
+                    // 保存令牌到 Redis（内部会检查重复并创建 provider 条目）
+                    const saveResult = await saveKiroTokenToRedis(saveData, { skipDuplicateCheck: false });
+
+                    if (!saveResult.success) {
+                        if (saveResult.duplicate) {
+                            console.log(`${KIRO_OAUTH_CONFIG.logPrefix} Token already exists, UUID: ${saveResult.existingUuid}`);
+                            // OAuth 成功但 token 重复，仍返回成功页面
+                        } else {
+                            console.error(`${KIRO_OAUTH_CONFIG.logPrefix} Failed to save token: ${saveResult.error}`);
+                            res.writeHead(500, { 'Content-Type': 'text/html; charset=utf-8' });
+                            res.end(generateResponsePage(false, `保存令牌失败: ${saveResult.error}`));
+                            return;
+                        }
+                    } else {
+                        console.log(`${KIRO_OAUTH_CONFIG.logPrefix} 令牌已保存到 Redis, UUID: ${saveResult.uuid}`);
+                    }
+
                     // 广播成功事件
                     broadcastEvent('oauth_success', {
                         provider: 'claude-kiro-oauth',
-                        credPath,
-                        relativePath: path.relative(process.cwd(), credPath),
+                        uuid: saveResult.uuid || saveResult.existingUuid,
                         timestamp: new Date().toISOString()
                     });
-                    
-                    // 自动关联新生成的凭据到 Pools
-                    await autoLinkProviderConfigs(CONFIG);
-                    
+
+                    // 不再需要调用 autoLinkProviderConfigs，provider 条目已在 saveKiroTokenToRedis 中创建
+
                     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
                     res.end(generateResponsePage(true, '授权成功！您可以关闭此页面'));
                     
@@ -699,57 +782,26 @@ async function refreshKiroToken(refreshToken, region = KIRO_REFRESH_CONSTANTS.DE
 }
 
 /**
- * 检查 Kiro 凭据是否已存在（基于 refreshToken + provider 组合）
+ * 检查 Kiro 凭据是否已存在（基于 refreshToken 查询 Redis 索引）
  * @param {string} refreshToken - 要检查的 refreshToken
  * @param {string} provider - 提供商名称 (默认: 'claude-kiro-oauth')
- * @returns {Promise<{isDuplicate: boolean, existingPath?: string}>} 检查结果
+ * @returns {Promise<{isDuplicate: boolean, existingUuid?: string}>} 检查结果
  */
 export async function checkKiroCredentialsDuplicate(refreshToken, provider = 'claude-kiro-oauth') {
-    const kiroDir = path.join(process.cwd(), 'configs', 'kiro');
-    
+    if (!isStorageInitialized()) {
+        console.warn(`${KIRO_OAUTH_CONFIG.logPrefix} Storage not initialized, skipping duplicate check`);
+        return { isDuplicate: false };
+    }
+
     try {
-        // 检查 configs/kiro 目录是否存在
-        if (!fs.existsSync(kiroDir)) {
-            return { isDuplicate: false };
+        const storage = getStorageAdapter();
+        const result = await storage.checkKiroRefreshTokenExists(refreshToken);
+
+        if (result.isDuplicate) {
+            console.log(`${KIRO_OAUTH_CONFIG.logPrefix} Found duplicate refreshToken, existing UUID: ${result.existingUuid}`);
         }
-        
-        // 递归扫描所有 JSON 文件
-        const scanDirectory = async (dirPath) => {
-            const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
-            
-            for (const entry of entries) {
-                const fullPath = path.join(dirPath, entry.name);
-                
-                if (entry.isDirectory()) {
-                    const result = await scanDirectory(fullPath);
-                    if (result.isDuplicate) {
-                        return result;
-                    }
-                } else if (entry.isFile() && entry.name.endsWith('.json')) {
-                    try {
-                        const content = await fs.promises.readFile(fullPath, 'utf8');
-                        const credentials = JSON.parse(content);
-                        
-                        // 检查 refreshToken 是否匹配
-                        if (credentials.refreshToken && credentials.refreshToken === refreshToken) {
-                            const relativePath = path.relative(process.cwd(), fullPath);
-                            console.log(`${KIRO_OAUTH_CONFIG.logPrefix} Found duplicate refreshToken in: ${relativePath}`);
-                            return {
-                                isDuplicate: true,
-                                existingPath: relativePath
-                            };
-                        }
-                    } catch (parseError) {
-                        // 忽略解析错误的文件
-                    }
-                }
-            }
-            
-            return { isDuplicate: false };
-        };
-        
-        return await scanDirectory(kiroDir);
-        
+
+        return result;
     } catch (error) {
         console.warn(`${KIRO_OAUTH_CONFIG.logPrefix} Error checking duplicates:`, error.message);
         return { isDuplicate: false };
@@ -770,10 +822,10 @@ export async function batchImportKiroRefreshTokens(refreshTokens, region = KIRO_
         failed: 0,
         details: []
     };
-    
+
     for (let i = 0; i < refreshTokens.length; i++) {
         const refreshToken = refreshTokens[i].trim();
-        
+
         if (!refreshToken) {
             results.details.push({
                 index: i + 1,
@@ -783,51 +835,44 @@ export async function batchImportKiroRefreshTokens(refreshTokens, region = KIRO_
             results.failed++;
             continue;
         }
-        
-        // 检查重复
-        if (!skipDuplicateCheck) {
-            const duplicateCheck = await checkKiroCredentialsDuplicate(refreshToken);
-            if (duplicateCheck.isDuplicate) {
-                results.details.push({
-                    index: i + 1,
-                    success: false,
-                    error: 'duplicate',
-                    existingPath: duplicateCheck.existingPath
-                });
-                results.failed++;
-                continue;
-            }
-        }
-        
+
+        // 检查重复（通过 saveKiroTokenToRedis 内部检查）
+
         try {
             console.log(`${KIRO_OAUTH_CONFIG.logPrefix} 正在刷新第 ${i + 1}/${refreshTokens.length} 个 token...`);
-            
+
             const tokenData = await refreshKiroToken(refreshToken, region);
-            
-            // 生成文件路径: configs/kiro/{timestamp}_kiro-auth-token/{timestamp}_kiro-auth-token.json
-            const timestamp = Date.now();
-            const folderName = `${timestamp}_kiro-auth-token`;
-            const targetDir = path.join(process.cwd(), 'configs', 'kiro', folderName);
-            await fs.promises.mkdir(targetDir, { recursive: true });
-            
-            const credPath = path.join(targetDir, `${folderName}.json`);
-            await fs.promises.writeFile(credPath, JSON.stringify(tokenData, null, 2));
-            
-            const relativePath = path.relative(process.cwd(), credPath);
-            
-            console.log(`${KIRO_OAUTH_CONFIG.logPrefix} Token ${i + 1} 已保存: ${relativePath}`);
-            
+
+            // 保存到 Redis（内部会检查重复并创建 provider 条目）
+            const saveResult = await saveKiroTokenToRedis(tokenData, { skipDuplicateCheck });
+
+            if (!saveResult.success) {
+                if (saveResult.duplicate) {
+                    results.details.push({
+                        index: i + 1,
+                        success: false,
+                        error: 'duplicate',
+                        existingUuid: saveResult.existingUuid
+                    });
+                    results.failed++;
+                    continue;
+                }
+                throw new Error(saveResult.error || 'Failed to save token to Redis');
+            }
+
+            console.log(`${KIRO_OAUTH_CONFIG.logPrefix} Token ${i + 1} 已保存到 Redis, UUID: ${saveResult.uuid}`);
+
             results.details.push({
                 index: i + 1,
                 success: true,
-                path: relativePath,
+                uuid: saveResult.uuid,
                 expiresAt: tokenData.expiresAt
             });
             results.success++;
-            
+
         } catch (error) {
             console.error(`${KIRO_OAUTH_CONFIG.logPrefix} Token ${i + 1} 刷新失败:`, error.message);
-            
+
             results.details.push({
                 index: i + 1,
                 success: false,
@@ -836,19 +881,17 @@ export async function batchImportKiroRefreshTokens(refreshTokens, region = KIRO_
             results.failed++;
         }
     }
-    
-    // 如果有成功的，广播事件并自动关联
+
+    // 如果有成功的，广播事件
     if (results.success > 0) {
         broadcastEvent('oauth_batch_success', {
             provider: 'claude-kiro-oauth',
             count: results.success,
             timestamp: new Date().toISOString()
         });
-        
-        // 自动关联新生成的凭据到 Pools
-        await autoLinkProviderConfigs(CONFIG);
+        // 不再需要调用 autoLinkProviderConfigs，provider 条目已在 saveKiroTokenToRedis 中创建
     }
-    
+
     return results;
 }
 
@@ -867,7 +910,7 @@ export async function batchImportKiroRefreshTokensStream(refreshTokens, region =
         failed: 0,
         details: []
     };
-    
+
     for (let i = 0; i < refreshTokens.length; i++) {
         const refreshToken = refreshTokens[i].trim();
         const progressData = {
@@ -875,7 +918,7 @@ export async function batchImportKiroRefreshTokensStream(refreshTokens, region =
             total: refreshTokens.length,
             current: null
         };
-        
+
         if (!refreshToken) {
             progressData.current = {
                 index: i + 1,
@@ -884,7 +927,7 @@ export async function batchImportKiroRefreshTokensStream(refreshTokens, region =
             };
             results.details.push(progressData.current);
             results.failed++;
-            
+
             // 发送进度更新
             if (onProgress) {
                 onProgress({
@@ -895,62 +938,55 @@ export async function batchImportKiroRefreshTokensStream(refreshTokens, region =
             }
             continue;
         }
-        
-        // 检查重复
-        if (!skipDuplicateCheck) {
-            const duplicateCheck = await checkKiroCredentialsDuplicate(refreshToken);
-            if (duplicateCheck.isDuplicate) {
-                progressData.current = {
-                    index: i + 1,
-                    success: false,
-                    error: 'duplicate',
-                    existingPath: duplicateCheck.existingPath
-                };
-                results.details.push(progressData.current);
-                results.failed++;
-                
-                // 发送进度更新
-                if (onProgress) {
-                    onProgress({
-                        ...progressData,
-                        successCount: results.success,
-                        failedCount: results.failed
-                    });
-                }
-                continue;
-            }
-        }
-        
+
+        // 检查重复（通过 saveKiroTokenToRedis 内部检查）
+
         try {
             console.log(`${KIRO_OAUTH_CONFIG.logPrefix} 正在刷新第 ${i + 1}/${refreshTokens.length} 个 token...`);
-            
+
             const tokenData = await refreshKiroToken(refreshToken, region);
-            
-            // 生成文件路径: configs/kiro/{timestamp}_kiro-auth-token/{timestamp}_kiro-auth-token.json
-            const timestamp = Date.now();
-            const folderName = `${timestamp}_kiro-auth-token`;
-            const targetDir = path.join(process.cwd(), 'configs', 'kiro', folderName);
-            await fs.promises.mkdir(targetDir, { recursive: true });
-            
-            const credPath = path.join(targetDir, `${folderName}.json`);
-            await fs.promises.writeFile(credPath, JSON.stringify(tokenData, null, 2));
-            
-            const relativePath = path.relative(process.cwd(), credPath);
-            
-            console.log(`${KIRO_OAUTH_CONFIG.logPrefix} Token ${i + 1} 已保存: ${relativePath}`);
-            
+
+            // 保存到 Redis（内部会检查重复并创建 provider 条目）
+            const saveResult = await saveKiroTokenToRedis(tokenData, { skipDuplicateCheck });
+
+            if (!saveResult.success) {
+                if (saveResult.duplicate) {
+                    progressData.current = {
+                        index: i + 1,
+                        success: false,
+                        error: 'duplicate',
+                        existingUuid: saveResult.existingUuid
+                    };
+                    results.details.push(progressData.current);
+                    results.failed++;
+
+                    // 发送进度更新
+                    if (onProgress) {
+                        onProgress({
+                            ...progressData,
+                            successCount: results.success,
+                            failedCount: results.failed
+                        });
+                    }
+                    continue;
+                }
+                throw new Error(saveResult.error || 'Failed to save token to Redis');
+            }
+
+            console.log(`${KIRO_OAUTH_CONFIG.logPrefix} Token ${i + 1} 已保存到 Redis, UUID: ${saveResult.uuid}`);
+
             progressData.current = {
                 index: i + 1,
                 success: true,
-                path: relativePath,
+                uuid: saveResult.uuid,
                 expiresAt: tokenData.expiresAt
             };
             results.details.push(progressData.current);
             results.success++;
-            
+
         } catch (error) {
             console.error(`${KIRO_OAUTH_CONFIG.logPrefix} Token ${i + 1} 刷新失败:`, error.message);
-            
+
             progressData.current = {
                 index: i + 1,
                 success: false,
@@ -959,7 +995,7 @@ export async function batchImportKiroRefreshTokensStream(refreshTokens, region =
             results.details.push(progressData.current);
             results.failed++;
         }
-        
+
         // 发送进度更新
         if (onProgress) {
             onProgress({
@@ -969,19 +1005,17 @@ export async function batchImportKiroRefreshTokensStream(refreshTokens, region =
             });
         }
     }
-    
-    // 如果有成功的，广播事件并自动关联
+
+    // 如果有成功的，广播事件
     if (results.success > 0) {
         broadcastEvent('oauth_batch_success', {
             provider: 'claude-kiro-oauth',
             count: results.success,
             timestamp: new Date().toISOString()
         });
-        
-        // 自动关联新生成的凭据到 Pools
-        await autoLinkProviderConfigs(CONFIG);
+        // 不再需要调用 autoLinkProviderConfigs，provider 条目已在 saveKiroTokenToRedis 中创建
     }
-    
+
     return results;
 }
 
@@ -1000,28 +1034,16 @@ export async function importAwsCredentials(credentials, skipDuplicateCheck = fal
         if (!credentials.clientSecret) missingFields.push('clientSecret');
         if (!credentials.accessToken) missingFields.push('accessToken');
         if (!credentials.refreshToken) missingFields.push('refreshToken');
-        
+
         if (missingFields.length > 0) {
             return {
                 success: false,
                 error: `Missing required fields: ${missingFields.join(', ')}`
             };
         }
-        
-        // 检查重复凭据
-        if (!skipDuplicateCheck) {
-            const duplicateCheck = await checkKiroCredentialsDuplicate(credentials.refreshToken);
-            if (duplicateCheck.isDuplicate) {
-                return {
-                    success: false,
-                    error: 'duplicate',
-                    existingPath: duplicateCheck.existingPath
-                };
-            }
-        }
-        
+
         console.log(`${KIRO_OAUTH_CONFIG.logPrefix} Importing AWS credentials...`);
-        
+
         // 准备凭据数据 - 四个字段都是必需的
         const credentialsData = {
             clientId: credentials.clientId,
@@ -1029,10 +1051,9 @@ export async function importAwsCredentials(credentials, skipDuplicateCheck = fal
             accessToken: credentials.accessToken,
             refreshToken: credentials.refreshToken,
             authMethod: credentials.authMethod || 'builder-id',
-            // region: credentials.region || KIRO_REFRESH_CONSTANTS.DEFAULT_REGION,
             idcRegion: credentials.idcRegion || KIRO_REFRESH_CONSTANTS.IDC_REGION
         };
-        
+
         // 可选字段
         if (credentials.expiresAt) {
             credentialsData.expiresAt = credentials.expiresAt;
@@ -1043,14 +1064,14 @@ export async function importAwsCredentials(credentials, skipDuplicateCheck = fal
         if (credentials.registrationExpiresAt) {
             credentialsData.registrationExpiresAt = credentials.registrationExpiresAt;
         }
-        
+
         // 尝试刷新获取最新的 accessToken
         try {
             console.log(`${KIRO_OAUTH_CONFIG.logPrefix} Attempting to refresh token with provided credentials...`);
-            
+
             const refreshRegion = credentials.idcRegion || KIRO_REFRESH_CONSTANTS.IDC_REGION;
             const refreshUrl = KIRO_REFRESH_CONSTANTS.REFRESH_IDC_URL.replace('{{region}}', refreshRegion);
-            
+
             const refreshResponse = await fetchWithProxy(refreshUrl, {
                 method: 'POST',
                 headers: {
@@ -1063,7 +1084,7 @@ export async function importAwsCredentials(credentials, skipDuplicateCheck = fal
                     grantType: 'refresh_token'
                 })
             }, 'claude-kiro-oauth');
-            
+
             if (refreshResponse.ok) {
                 const tokenData = await refreshResponse.json();
                 credentialsData.accessToken = tokenData.accessToken;
@@ -1078,35 +1099,40 @@ export async function importAwsCredentials(credentials, skipDuplicateCheck = fal
             console.warn(`${KIRO_OAUTH_CONFIG.logPrefix} Token refresh error:`, refreshError.message);
             // 继续保存原始凭据
         }
-        
-        // 生成文件路径: configs/kiro/{timestamp}_kiro-auth-token/{timestamp}_kiro-auth-token.json
-        const timestamp = Date.now();
-        const folderName = `${timestamp}_kiro-auth-token`;
-        const targetDir = path.join(process.cwd(), 'configs', 'kiro', folderName);
-        await fs.promises.mkdir(targetDir, { recursive: true });
-        
-        const credPath = path.join(targetDir, `${folderName}.json`);
-        await fs.promises.writeFile(credPath, JSON.stringify(credentialsData, null, 2));
-        
-        const relativePath = path.relative(process.cwd(), credPath);
-        
-        console.log(`${KIRO_OAUTH_CONFIG.logPrefix} AWS credentials saved to: ${relativePath}`);
-        
+
+        // 保存到 Redis（内部会检查重复并创建 provider 条目）
+        const saveResult = await saveKiroTokenToRedis(credentialsData, { skipDuplicateCheck });
+
+        if (!saveResult.success) {
+            if (saveResult.duplicate) {
+                return {
+                    success: false,
+                    error: 'duplicate',
+                    existingUuid: saveResult.existingUuid
+                };
+            }
+            return {
+                success: false,
+                error: saveResult.error || 'Failed to save credentials to Redis'
+            };
+        }
+
+        console.log(`${KIRO_OAUTH_CONFIG.logPrefix} AWS credentials saved to Redis, UUID: ${saveResult.uuid}`);
+
         // 广播事件
         broadcastEvent('oauth_success', {
             provider: 'claude-kiro-oauth',
-            relativePath: relativePath,
+            uuid: saveResult.uuid,
             timestamp: new Date().toISOString()
         });
-        
-        // 自动关联新生成的凭据到 Pools
-        await autoLinkProviderConfigs(CONFIG);
-        
+
+        // 不再需要调用 autoLinkProviderConfigs，provider 条目已在 saveKiroTokenToRedis 中创建
+
         return {
             success: true,
-            path: relativePath
+            uuid: saveResult.uuid
         };
-        
+
     } catch (error) {
         console.error(`${KIRO_OAUTH_CONFIG.logPrefix} AWS credentials import failed:`, error);
         return {

@@ -48,6 +48,70 @@ async function getAllProvidersUsage(currentConfig, providerPoolManager) {
 }
 
 /**
+ * 获取单个提供商实例的用量信息
+ * @param {Object} provider - 提供商配置
+ * @param {string} providerType - 提供商类型
+ * @returns {Promise<Object>} 实例用量结果
+ */
+async function getSingleProviderUsage(provider, providerType) {
+    const providerKey = providerType + (provider.uuid || '');
+    let adapter = serviceInstances[providerKey];
+
+    const instanceResult = {
+        uuid: provider.uuid || 'unknown',
+        name: getProviderDisplayName(provider, providerType),
+        isHealthy: provider.isHealthy !== false,
+        isDisabled: provider.isDisabled === true,
+        success: false,
+        usage: null,
+        error: null
+    };
+
+    // First check if disabled, skip initialization for disabled providers
+    if (provider.isDisabled) {
+        instanceResult.error = 'Provider is disabled';
+        return instanceResult;
+    }
+
+    if (!adapter) {
+        // Service instance not initialized, try auto-initialization
+        try {
+            console.log(`[Usage API] Auto-initializing service adapter for ${providerType}: ${provider.uuid}`);
+            // Build configuration object
+            const serviceConfig = {
+                ...CONFIG,
+                ...provider,
+                MODEL_PROVIDER: providerType
+            };
+            adapter = getServiceAdapter(serviceConfig);
+        } catch (initError) {
+            console.error(`[Usage API] Failed to initialize adapter for ${providerType}: ${provider.uuid}:`, initError.message);
+            instanceResult.error = `Service instance initialization failed: ${initError.message}`;
+            return instanceResult;
+        }
+    }
+
+    // If adapter exists (including just initialized), try to get usage
+    if (adapter) {
+        try {
+            // 添加超时控制，避免长时间等待
+            const usagePromise = getAdapterUsage(adapter, providerType);
+            const timeoutPromise = new Promise((_, reject) =>
+                setTimeout(() => reject(new Error('Usage query timeout')), 10000)
+            );
+
+            const usage = await Promise.race([usagePromise, timeoutPromise]);
+            instanceResult.success = true;
+            instanceResult.usage = usage;
+        } catch (error) {
+            instanceResult.error = error.message;
+        }
+    }
+
+    return instanceResult;
+}
+
+/**
  * 获取指定提供商类型的用量信息
  * @param {string} providerType - 提供商类型
  * @param {Object} currentConfig - 当前配置
@@ -73,69 +137,26 @@ async function getProviderTypeUsage(providerType, currentConfig, providerPoolMan
 
     result.totalCount = providers.length;
 
-    // 遍历所有提供商实例获取用量
-    for (const provider of providers) {
-        const providerKey = providerType + (provider.uuid || '');
-        let adapter = serviceInstances[providerKey];
-        
-        const instanceResult = {
-            uuid: provider.uuid || 'unknown',
-            name: getProviderDisplayName(provider, providerType),
-            isHealthy: provider.isHealthy !== false,
-            isDisabled: provider.isDisabled === true,
-            success: false,
-            usage: null,
-            error: null
-        };
+    // 并发获取所有提供商的用量，使用 Promise.all 提高效率
+    // 每批次最多处理 5 个，避免同时发起太多请求
+    const BATCH_SIZE = 5;
+    const batches = [];
+    for (let i = 0; i < providers.length; i += BATCH_SIZE) {
+        batches.push(providers.slice(i, i + BATCH_SIZE));
+    }
 
-        // First check if disabled, skip initialization for disabled providers
-        if (provider.isDisabled) {
-            instanceResult.error = 'Provider is disabled';
-            result.errorCount++;
-        } else if (!adapter) {
-            // Service instance not initialized, try auto-initialization
-            try {
-                // 限制并发初始化，避免CPU占用过高
-                if (result.totalCount > 4) {
-                    instanceResult.error = 'Too many providers, skipping auto-initialization to prevent CPU overload';
-                    result.errorCount++;
-                } else {
-                    console.log(`[Usage API] Auto-initializing service adapter for ${providerType}: ${provider.uuid}`);
-                    // Build configuration object
-                    const serviceConfig = {
-                        ...CONFIG,
-                        ...provider,
-                        MODEL_PROVIDER: providerType
-                    };
-                    adapter = getServiceAdapter(serviceConfig);
-                }
-            } catch (initError) {
-                console.error(`[Usage API] Failed to initialize adapter for ${providerType}: ${provider.uuid}:`, initError.message);
-                instanceResult.error = `Service instance initialization failed: ${initError.message}`;
-                result.errorCount++;
-            }
-        }
-        
-        // If adapter exists (including just initialized), and no error, try to get usage
-        if (adapter && !instanceResult.error) {
-            try {
-                // 添加超时控制，避免长时间等待
-                const usagePromise = getAdapterUsage(adapter, providerType);
-                const timeoutPromise = new Promise((_, reject) => 
-                    setTimeout(() => reject(new Error('Usage query timeout')), 10000)
-                );
-                
-                const usage = await Promise.race([usagePromise, timeoutPromise]);
-                instanceResult.success = true;
-                instanceResult.usage = usage;
+    for (const batch of batches) {
+        const batchPromises = batch.map(provider => getSingleProviderUsage(provider, providerType));
+        const batchResults = await Promise.all(batchPromises);
+
+        for (const instanceResult of batchResults) {
+            if (instanceResult.success) {
                 result.successCount++;
-            } catch (error) {
-                instanceResult.error = error.message;
+            } else if (instanceResult.error) {
                 result.errorCount++;
             }
+            result.instances.push(instanceResult);
         }
-
-        result.instances.push(instanceResult);
     }
 
     return result;

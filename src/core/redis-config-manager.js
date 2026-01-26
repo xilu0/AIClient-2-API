@@ -6,6 +6,7 @@
 
 import { StorageAdapter } from './storage-adapter.js';
 import { WriteQueue } from './write-queue.js';
+import crypto from 'crypto';
 
 /**
  * Redis-based storage adapter implementation.
@@ -828,6 +829,170 @@ class RedisConfigManager extends StorageAdapter {
         } catch (error) {
             console.error(`[RedisConfig] Failed to release token lock for ${providerType}:${uuid}:`, error.message);
             return false;
+        }
+    }
+
+    // ==================== Kiro OAuth Token Methods ====================
+
+    /**
+     * Generate a hash for refresh token deduplication index
+     * @private
+     * @param {string} refreshToken - The refresh token to hash
+     * @returns {string} SHA256 hash of the refresh token (first 32 chars)
+     */
+    _hashRefreshToken(refreshToken) {
+        return crypto.createHash('sha256').update(refreshToken).digest('hex').substring(0, 32);
+    }
+
+    /**
+     * Set a Kiro OAuth token with refresh token deduplication index.
+     * Stores token data and creates an index for deduplication checking.
+     * @param {string} uuid - Provider UUID
+     * @param {Object} tokenData - Token data (accessToken, refreshToken, expiresAt, authMethod, etc.)
+     * @returns {Promise<{success: boolean, duplicate?: boolean, existingUuid?: string}>}
+     */
+    async setKiroToken(uuid, tokenData) {
+        const providerType = 'claude-kiro-oauth';
+        const client = this.redisManager.getClient();
+
+        if (!client || !this.redisManager.isConnected()) {
+            console.error('[RedisConfig] Cannot set Kiro token: Redis not connected');
+            return { success: false };
+        }
+
+        try {
+            // Check for duplicate refresh token first
+            if (tokenData.refreshToken) {
+                const refreshHash = this._hashRefreshToken(tokenData.refreshToken);
+                const indexKey = this._key(`kiro:refresh-index:${refreshHash}`);
+                const existingUuid = await client.get(indexKey);
+
+                if (existingUuid && existingUuid !== uuid) {
+                    console.log(`[RedisConfig] Duplicate Kiro refreshToken detected, existing UUID: ${existingUuid}`);
+                    return { success: false, duplicate: true, existingUuid };
+                }
+            }
+
+            // Store the token
+            const tokenKey = this._key(`tokens:${providerType}:${uuid}`);
+            await client.set(tokenKey, JSON.stringify(tokenData));
+
+            // Create/update refresh token index for deduplication
+            if (tokenData.refreshToken) {
+                const refreshHash = this._hashRefreshToken(tokenData.refreshToken);
+                const indexKey = this._key(`kiro:refresh-index:${refreshHash}`);
+                await client.set(indexKey, uuid);
+            }
+
+            console.log(`[RedisConfig] Kiro token stored for UUID: ${uuid}`);
+            return { success: true };
+        } catch (error) {
+            console.error(`[RedisConfig] Failed to set Kiro token for ${uuid}:`, error.message);
+            return { success: false };
+        }
+    }
+
+    /**
+     * Check if a Kiro refresh token already exists (for deduplication).
+     * @param {string} refreshToken - The refresh token to check
+     * @returns {Promise<{isDuplicate: boolean, existingUuid?: string}>}
+     */
+    async checkKiroRefreshTokenExists(refreshToken) {
+        const client = this.redisManager.getClient();
+
+        if (!client || !this.redisManager.isConnected()) {
+            console.warn('[RedisConfig] Cannot check Kiro refresh token: Redis not connected');
+            return { isDuplicate: false };
+        }
+
+        try {
+            const refreshHash = this._hashRefreshToken(refreshToken);
+            const indexKey = this._key(`kiro:refresh-index:${refreshHash}`);
+            const existingUuid = await client.get(indexKey);
+
+            if (existingUuid) {
+                console.log(`[RedisConfig] Found existing Kiro token with UUID: ${existingUuid}`);
+                return { isDuplicate: true, existingUuid };
+            }
+
+            return { isDuplicate: false };
+        } catch (error) {
+            console.error('[RedisConfig] Failed to check Kiro refresh token:', error.message);
+            return { isDuplicate: false };
+        }
+    }
+
+    /**
+     * Delete a Kiro OAuth token and its refresh token index.
+     * @param {string} uuid - Provider UUID to delete
+     * @returns {Promise<{success: boolean}>}
+     */
+    async deleteKiroToken(uuid) {
+        const providerType = 'claude-kiro-oauth';
+        const client = this.redisManager.getClient();
+
+        if (!client || !this.redisManager.isConnected()) {
+            console.error('[RedisConfig] Cannot delete Kiro token: Redis not connected');
+            return { success: false };
+        }
+
+        try {
+            const tokenKey = this._key(`tokens:${providerType}:${uuid}`);
+
+            // Get the token first to find its refresh token for index cleanup
+            const tokenData = await client.get(tokenKey);
+            if (tokenData) {
+                const parsed = JSON.parse(tokenData);
+                if (parsed.refreshToken) {
+                    // Delete the refresh token index
+                    const refreshHash = this._hashRefreshToken(parsed.refreshToken);
+                    const indexKey = this._key(`kiro:refresh-index:${refreshHash}`);
+                    await client.del(indexKey);
+                    console.log(`[RedisConfig] Deleted Kiro refresh token index for UUID: ${uuid}`);
+                }
+            }
+
+            // Delete the token itself
+            await client.del(tokenKey);
+            console.log(`[RedisConfig] Deleted Kiro token for UUID: ${uuid}`);
+
+            return { success: true };
+        } catch (error) {
+            console.error(`[RedisConfig] Failed to delete Kiro token for ${uuid}:`, error.message);
+            return { success: false };
+        }
+    }
+
+    /**
+     * Get all Kiro OAuth tokens (for listing/export).
+     * @returns {Promise<Array<{uuid: string, tokenData: Object}>>}
+     */
+    async getAllKiroTokens() {
+        const providerType = 'claude-kiro-oauth';
+        const client = this.redisManager.getClient();
+
+        if (!client || !this.redisManager.isConnected()) {
+            console.warn('[RedisConfig] Cannot get Kiro tokens: Redis not connected');
+            return [];
+        }
+
+        try {
+            const pattern = this._key(`tokens:${providerType}:*`);
+            const keys = await client.keys(pattern);
+            const tokens = [];
+
+            for (const key of keys) {
+                const uuid = key.replace(this._key(`tokens:${providerType}:`), '');
+                const data = await client.get(key);
+                if (data) {
+                    tokens.push({ uuid, tokenData: JSON.parse(data) });
+                }
+            }
+
+            return tokens;
+        } catch (error) {
+            console.error('[RedisConfig] Failed to get all Kiro tokens:', error.message);
+            return [];
         }
     }
 
