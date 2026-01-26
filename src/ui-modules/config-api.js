@@ -17,15 +17,35 @@ export async function reloadConfig(providerPoolManager) {
     try {
         // Import config manager dynamically
         const { initializeConfig } = await import('../core/config-manager.js');
-        
+
         // Reload main config
         const newConfig = await initializeConfig(process.argv.slice(2), 'configs/config.json');
+
+        // Load provider pools from Redis storage adapter (not from config file)
+        // Redis-only 架构：providerPools 存储在 Redis 中，不是 config.json
+        if (isStorageInitialized()) {
+            const adapter = getStorageAdapter();
+            if (adapter) {
+                try {
+                    const pools = await adapter.getProviderPools();
+                    newConfig.providerPools = pools;
+                    console.log(`[UI API] Loaded ${Object.keys(pools).length} provider pool types from ${adapter.getType()} storage`);
+                } catch (error) {
+                    console.error('[UI API] Failed to load provider pools from storage adapter:', error.message);
+                    // Keep existing pools if reload fails
+                    if (providerPoolManager && providerPoolManager.providerPools) {
+                        newConfig.providerPools = providerPoolManager.providerPools;
+                    }
+                }
+            }
+        }
+
         // Update provider pool manager if available
         if (providerPoolManager) {
             providerPoolManager.providerPools = newConfig.providerPools;
             providerPoolManager.initializeProviderStatus();
         }
-        
+
         // Update global CONFIG
         Object.assign(CONFIG, newConfig);
         console.log('[UI API] Configuration reloaded:');
@@ -33,9 +53,9 @@ export async function reloadConfig(providerPoolManager) {
         // Update initApiService - 清空并重新初始化服务实例
         Object.keys(serviceInstances).forEach(key => delete serviceInstances[key]);
         initApiService(CONFIG);
-        
+
         console.log('[UI API] Configuration reloaded successfully');
-        
+
         return newConfig;
     } catch (error) {
         console.error('[UI API] Failed to reload configuration:', error);
