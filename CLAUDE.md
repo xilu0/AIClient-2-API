@@ -63,7 +63,7 @@ API requests go through: `request-handler.js` → `api-manager.js` → `adapter.
 | `src/core/` | Process manager (`master.js`), config loading (`config-manager.js`), plugin system |
 | `src/ui-modules/` | Web UI backend API endpoints (13 modules: oauth, provider, config, usage, etc.) |
 | `src/utils/` | Shared utilities — `common.js` has constants including `MODEL_PROVIDER` enum |
-| `configs/` | Runtime config (`config.json`, `provider_pools.json`, `pwd`) |
+| `configs/` | Runtime config (`config.json`, `pwd`) — provider pools now stored in Redis |
 | `static/` | Web UI frontend |
 | `tests/` | Jest test suite |
 
@@ -87,19 +87,19 @@ See `PROVIDER_ADAPTER_GUIDE.md` for the full 5-step process:
 
 ### Configuration
 
-- `configs/config.json` — Main settings (port, API key, default provider, proxy, fallback chains)
-- `configs/provider_pools.json` — Multi-account pool definitions per provider type
+- `configs/config.json` — Main settings (port, API key, default provider, proxy, fallback chains, Redis config)
 - `configs/pwd` — Web UI password
+- **Provider pools** — Stored in Redis (no longer uses `provider_pools.json`)
 - CLI args override config: `--host`, `--port`, `--api-key`, `--model-provider`, etc.
 
-### Redis Configuration
+### Redis Configuration (Required)
 
-Redis provides atomic operations for concurrent access, enabling accurate usage tracking across multiple instances.
+Redis is **required** for provider pool storage. It provides atomic operations for concurrent access, eliminating race conditions and enabling accurate usage tracking across multiple instances.
 
 **Environment Variables**:
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REDIS_ENABLED` | `false` | Enable Redis storage |
+| `REDIS_ENABLED` | `true` | Redis storage (required for provider pools) |
 | `REDIS_URL` | - | Full Redis URL (overrides host/port) |
 | `REDIS_HOST` | `localhost` | Redis host |
 | `REDIS_PORT` | `6379` | Redis port |
@@ -164,7 +164,7 @@ npm run init:redis -- --redis-url redis://redis:6379 --api-key YOUR_API_KEY
 | `storage-adapter.js` | Base interface definition |
 | `write-queue.js` | Queues writes during Redis unavailability |
 
-**Graceful Degradation**: When Redis disconnects, the service continues using in-memory cache and queues writes for replay on reconnection.
+**Runtime Behavior**: Redis is required at startup. Once connected, if Redis temporarily disconnects, the service continues using in-memory cache and queues writes for replay on reconnection. Provider pools are stored exclusively in Redis.
 
 ### Protocol Routing
 
@@ -206,6 +206,7 @@ These must survive upstream merges in `src/providers/claude/claude-kiro.js`:
 **This is a core billing feature — merges must not break this design.**
 
 ## Changelog
+- 2026-01-26: **BREAKING**: Redis-only architecture for provider pools, removed `provider_pools.json` (fixes high-concurrency CPU bottleneck)
 - 2026-01-25: Added Redis configuration storage with graceful fallback, CLI migration tools, and /api/redis/status endpoint
 - 2026-01-25: Expanded CLAUDE.md with architecture, commands, and development guidance
 - 2026-01-24: Created document with Kiro cache token distribution protection notes
@@ -213,5 +214,4 @@ These must survive upstream merges in `src/providers/claude/claude-kiro.js`:
 ## Active Technologies
 - Node.js ES Modules (ES2022+, `"type": "module"`)
 - ioredis 5.x (Redis client for atomic operations)
-- Redis 7.x Alpine (via Docker, with AOF persistence)
-- File-based fallback (configs/*.json) when Redis unavailable
+- Redis 7.x Alpine (via Docker, with AOF persistence) — **required for provider pools**
