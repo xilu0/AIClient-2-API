@@ -33,13 +33,16 @@ if (!adapter) {
 ## 影响范围
 
 - **修改文件**: 1 个（`src/ui-modules/provider-api.js`）
-- **修改函数**: 10 个 UI API 处理函数
+- **修改函数**: 11 个 UI API 处理函数（10个写操作 + 1个读操作）
 - **修改行数**: 约 100-150 行
 
 ## 文档结构
 
 - `plan.md` - 详细的实施计划，包含问题分析、解决方案、测试方案
 - `implementation.md` - 实施记录，包含修改详情、统计数据、验证结果
+- `final-fix.md` - handleGetProviderType 函数的最终修复（移除遗漏的文件降级）
+- `redis-only-implementation.md` - Redis-Only 架构实施记录（移除 provider_pools.json）
+- `troubleshooting.md` - 问题诊断和解决过程
 - `README.md` - 本文件，概述说明
 
 ## 状态
@@ -48,8 +51,19 @@ if (!adapter) {
 - [x] 解决方案设计完成
 - [x] 代码实施（提交 928cf26）
 - [x] 优化增强（提交 fce6b27 - 添加严格模式和降级警告）
-- [ ] 测试验证
-- [x] 文档更新（implementation.md + 严格模式文档）
+- [x] 最终修复（修复 handleGetProviderType 函数的文件降级）
+- [x] **Redis-Only 架构实施**（移除 provider_pools.json，强制 Redis 存储）
+- [x] 测试验证（服务成功启动，API 正常工作）
+- [x] 文档更新（完整的实施文档和故障排查文档）
+
+## 重要突破性改变
+
+### 2026-01-26: Redis-Only 架构
+- **移除** `configs/provider_pools.json` 文件（备份为 `.removed`）
+- **修改** `src/core/storage-factory.js` - 强制要求 Redis，移除文件降级
+- **修改** `src/core/file-storage-adapter.js` - 处理 `poolsPath: null`，provider pools 方法返回空数据
+- **修改** `configs/config.json` - 添加 Redis 配置，默认启用
+- **结果**: 服务直接使用 Redis 启动，无需环境变量，provider pools 完全存储在 Redis
 
 ## 相关资源
 

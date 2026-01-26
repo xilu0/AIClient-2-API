@@ -18,14 +18,15 @@ class FileStorageAdapter extends StorageAdapter {
     /**
      * @param {Object} options - Configuration options
      * @param {string} [options.configPath='configs/config.json'] - Path to config.json
-     * @param {string} [options.poolsPath='configs/provider_pools.json'] - Path to provider_pools.json
+     * @param {string|null} [options.poolsPath=null] - Path to provider_pools.json (null for Redis-only mode)
      * @param {string} [options.pwdPath='configs/pwd'] - Path to password file
      * @param {string} [options.tokenStorePath='configs/token-store.json'] - Path to session token store
      */
     constructor(options = {}) {
         super();
         this.configPath = options.configPath || 'configs/config.json';
-        this.poolsPath = options.poolsPath || 'configs/provider_pools.json';
+        // Default to null for poolsPath - Redis-only mode by default
+        this.poolsPath = options.poolsPath !== undefined ? options.poolsPath : null;
         this.pwdPath = options.pwdPath || 'configs/pwd';
         this.tokenStorePath = options.tokenStorePath || 'configs/token-store.json';
 
@@ -79,6 +80,12 @@ class FileStorageAdapter extends StorageAdapter {
     // ==================== Provider Pools ====================
 
     async getProviderPools() {
+        // Provider pools no longer stored in files when poolsPath is null
+        // (Redis-only mode with file backup disabled for pools)
+        if (!this.poolsPath) {
+            return {};
+        }
+
         if (this._poolsCache) {
             return this._poolsCache;
         }
@@ -102,6 +109,11 @@ class FileStorageAdapter extends StorageAdapter {
     }
 
     async setProviderPool(providerType, providers) {
+        // Do nothing when poolsPath is null (Redis-only mode)
+        if (!this.poolsPath) {
+            return;
+        }
+
         const pools = await this.getProviderPools();
         pools[providerType] = providers;
         this._poolsCache = pools;
@@ -114,6 +126,11 @@ class FileStorageAdapter extends StorageAdapter {
     }
 
     async updateProvider(providerType, uuid, updates) {
+        // Do nothing when poolsPath is null (Redis-only mode)
+        if (!this.poolsPath) {
+            return;
+        }
+
         const pools = await this.getProviderPools();
         const pool = pools[providerType] || [];
         const index = pool.findIndex(p => p.uuid === uuid);
@@ -129,6 +146,11 @@ class FileStorageAdapter extends StorageAdapter {
     }
 
     async addProvider(providerType, provider) {
+        // Do nothing when poolsPath is null (Redis-only mode)
+        if (!this.poolsPath) {
+            return;
+        }
+
         const pools = await this.getProviderPools();
         if (!pools[providerType]) {
             pools[providerType] = [];
@@ -140,6 +162,11 @@ class FileStorageAdapter extends StorageAdapter {
     }
 
     async deleteProvider(providerType, uuid) {
+        // Do nothing when poolsPath is null (Redis-only mode)
+        if (!this.poolsPath) {
+            return;
+        }
+
         const pools = await this.getProviderPools();
         const pool = pools[providerType] || [];
         pools[providerType] = pool.filter(p => p.uuid !== uuid);
@@ -155,6 +182,11 @@ class FileStorageAdapter extends StorageAdapter {
     // ==================== Atomic Counter Operations ====================
 
     async incrementUsage(providerType, uuid) {
+        // Do nothing when poolsPath is null (Redis-only mode)
+        if (!this.poolsPath) {
+            return 0;
+        }
+
         const pools = await this.getProviderPools();
         const pool = pools[providerType] || [];
         const provider = pool.find(p => p.uuid === uuid);
@@ -171,6 +203,11 @@ class FileStorageAdapter extends StorageAdapter {
     }
 
     async incrementError(providerType, uuid, markUnhealthy = false) {
+        // Do nothing when poolsPath is null (Redis-only mode)
+        if (!this.poolsPath) {
+            return 0;
+        }
+
         const pools = await this.getProviderPools();
         const pool = pools[providerType] || [];
         const provider = pool.find(p => p.uuid === uuid);
@@ -346,6 +383,11 @@ class FileStorageAdapter extends StorageAdapter {
     // ==================== Bulk Operations ====================
 
     async saveAllProviderPools(pools) {
+        // Do nothing when poolsPath is null (Redis-only mode)
+        if (!this.poolsPath) {
+            return;
+        }
+
         this._poolsCache = pools;
         await this._forceSavePools();
     }
@@ -376,7 +418,8 @@ class FileStorageAdapter extends StorageAdapter {
      * @private
      */
     async _forceSavePools() {
-        if (!this._poolsCache) return;
+        // Do nothing when poolsPath is null (Redis-only mode)
+        if (!this.poolsPath || !this._poolsCache) return;
 
         if (this._saveTimer) {
             clearTimeout(this._saveTimer);

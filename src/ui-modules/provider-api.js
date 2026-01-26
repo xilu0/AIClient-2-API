@@ -67,16 +67,13 @@ export async function handleGetProviders(req, res, currentConfig, providerPoolMa
  */
 export async function handleGetProviderType(req, res, currentConfig, providerPoolManager, providerType) {
     let providerPools = {};
-    const filePath = currentConfig.PROVIDER_POOLS_FILE_PATH || 'configs/provider_pools.json';
-    try {
-        if (providerPoolManager && providerPoolManager.providerPools) {
-            providerPools = providerPoolManager.providerPools;
-        } else if (filePath && existsSync(filePath)) {
-            const poolsData = JSON.parse(readFileSync(filePath, 'utf-8'));
-            providerPools = poolsData;
-        }
-    } catch (error) {
-        console.warn('[UI API] Failed to load provider pools:', error.message);
+
+    // 仅从 providerPoolManager 获取数据，不再降级到文件
+    // 使用 !== undefined 检查以确保即使是空对象也能正确处理
+    if (providerPoolManager && providerPoolManager.providerPools !== undefined) {
+        providerPools = providerPoolManager.providerPools;
+    } else {
+        console.warn('[UI API] Provider pool manager not available for provider type:', providerType);
     }
 
     const providers = providerPools[providerType] || [];

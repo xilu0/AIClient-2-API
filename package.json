@@ -44,6 +44,7 @@
     "migrate:redis": "node src/cli/migrate-to-redis.js",
     "export:redis": "node src/cli/export-from-redis.js",
     "init:redis": "node src/cli/init-redis.js",
+    "sync:pools": "node src/cli/sync-provider-pools.js",
     "test:redis:stress": "node tests/redis-stress-test.js",
     "test:redis:benchmark": "node tests/redis-benchmark.js"
   }
