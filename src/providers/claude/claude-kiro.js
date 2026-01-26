@@ -2135,8 +2135,6 @@ async saveCredentialsToFile(filePath, newData) {
             const toolCalls = [];
             let currentToolCall = null; // 用于累积结构化工具调用
 
-            const estimatedInputTokens = this.estimateInputTokens(requestBody);
-
             // 1. 先发送 message_start 事件
             yield {
                 type: "message_start",
