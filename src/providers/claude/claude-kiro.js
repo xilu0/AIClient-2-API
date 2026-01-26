@@ -719,9 +719,19 @@ async saveCredentialsToFile(filePath, newData) {
         }
     }
 
-    // Always save to file as backup
-    await fs.writeFile(filePath, JSON.stringify(mergedData, null, 2), 'utf8');
-    console.info(`[Kiro Auth] Updated token file: ${filePath}`);
+    // Save to file as backup (only if we have a specific file path, skip for Redis-only mode)
+    // In Redis-only mode, credsFilePath will be undefined and filePath will be a generic default path
+    if (this.credsFilePath) {
+        try {
+            await fs.mkdir(path.dirname(filePath), { recursive: true });
+            await fs.writeFile(filePath, JSON.stringify(mergedData, null, 2), 'utf8');
+            console.info(`[Kiro Auth] Updated token file: ${filePath}`);
+        } catch (fileError) {
+            console.warn(`[Kiro Auth] Failed to write token file (Redis-only mode is OK): ${fileError.message}`);
+        }
+    } else {
+        console.debug('[Kiro Auth] Skipping file backup in Redis-only mode');
+    }
 }
 
     /**
