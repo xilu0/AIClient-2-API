@@ -272,8 +272,8 @@ class RedisConfigManager extends StorageAdapter {
 
             if (keys.length === 0) {
                 console.warn('[RedisConfig] ⚠️  Redis is connected but empty - no configuration data found');
-                console.warn('[RedisConfig] If migrating from file storage, run: npm run migrate:redis');
-                console.warn('[RedisConfig] Until migration, file-based configuration will be used as fallback');
+                console.warn('[RedisConfig] To migrate existing data from file storage, run: npm run migrate:redis');
+                console.warn('[RedisConfig] All data operations will return empty until migration is completed');
             } else {
                 console.log(`[RedisConfig] Found ${keys.length} configuration keys in Redis`);
 
