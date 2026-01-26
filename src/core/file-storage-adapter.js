@@ -274,6 +274,37 @@ class FileStorageAdapter extends StorageAdapter {
     }
 
     /**
+     * Delete token credentials for a provider
+     * @param {string} providerType - Provider type identifier
+     * @param {string} uuid - Provider UUID
+     * @returns {Promise<void>}
+     */
+    async deleteToken(providerType, uuid) {
+        const provider = await this.getProvider(providerType, uuid);
+        if (!provider) {
+            // Provider already deleted, token path unknown - skip silently
+            console.log(`[FileStorage] Provider ${uuid} not found, skipping token deletion`);
+            return;
+        }
+
+        const tokenPath = this._getTokenPath(providerType, provider);
+        if (!tokenPath) {
+            // No token path configured for this provider type
+            return;
+        }
+
+        try {
+            await pfs.unlink(tokenPath);
+            console.log(`[FileStorage] Deleted token file ${tokenPath}`);
+        } catch (err) {
+            if (err.code !== 'ENOENT') {
+                throw err;
+            }
+            // File doesn't exist, nothing to delete
+        }
+    }
+
+    /**
      * Get token file path for a provider
      * @private
      */

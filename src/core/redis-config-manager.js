@@ -695,6 +695,20 @@ class RedisConfigManager extends StorageAdapter {
     }
 
     /**
+     * Delete token credentials for a provider
+     * @param {string} providerType - Provider type identifier
+     * @param {string} uuid - Provider UUID
+     * @returns {Promise<void>}
+     */
+    async deleteToken(providerType, uuid) {
+        return this._execute(async (client) => {
+            const key = this._key(`tokens:${providerType}:${uuid}`);
+            await client.del(key);
+            console.log(`[RedisConfig] Deleted token ${providerType}:${uuid}`);
+        }, `deleteToken:${providerType}:${uuid}`);
+    }
+
+    /**
      * Atomically update a token with compare-and-swap pattern.
      * Prevents concurrent refresh conflicts by checking the refresh token.
      * @param {string} providerType - Provider type

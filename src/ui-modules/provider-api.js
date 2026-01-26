@@ -386,6 +386,12 @@ export async function handleDeleteProvider(req, res, currentConfig, providerPool
         let deleteResult = null;
         if (adapter) {
             try {
+                // Delete token before deleting provider (while we still have access to provider info)
+                try {
+                    await adapter.deleteToken(providerType, providerUuid);
+                } catch (tokenError) {
+                    console.warn(`[UI API] Failed to delete token for ${providerUuid}:`, tokenError.message);
+                }
                 deleteResult = await adapter.deleteProvider(providerType, providerUuid);
                 console.log(`[UI API] Deleted provider ${providerUuid} via ${adapter.getType()}${deleteResult?.queued ? ' (queued)' : ''}`);
             } catch (adapterError) {
@@ -727,6 +733,12 @@ export async function handleDeleteUnhealthyProviders(req, res, currentConfig, pr
         if (adapter) {
             for (const provider of unhealthyProviders) {
                 try {
+                    // Delete token before deleting provider (while we still have access to provider info)
+                    try {
+                        await adapter.deleteToken(providerType, provider.uuid);
+                    } catch (tokenError) {
+                        console.warn(`[UI API] Failed to delete token for ${provider.uuid}:`, tokenError.message);
+                    }
                     await adapter.deleteProvider(providerType, provider.uuid);
                     console.log(`[UI API] Deleted unhealthy provider ${provider.uuid} via ${adapter.getType()}`);
                 } catch (adapterError) {
@@ -842,6 +854,12 @@ export async function handleRefreshUnhealthyUuids(req, res, currentConfig, provi
                 // Delete old entry and add new one in storage adapter
                 if (adapter) {
                     try {
+                        // Delete old token before deleting provider (while we still have access to provider info)
+                        try {
+                            await adapter.deleteToken(providerType, oldUuid);
+                        } catch (tokenError) {
+                            console.warn(`[UI API] Failed to delete old token for ${oldUuid}:`, tokenError.message);
+                        }
                         await adapter.deleteProvider(providerType, oldUuid);
                         provider.uuid = newUuid;
                         await adapter.addProvider(providerType, provider);

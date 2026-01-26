@@ -201,6 +201,16 @@ class StorageAdapter {
         throw new Error('StorageAdapter.setToken() must be implemented');
     }
 
+    /**
+     * Delete token credentials for a provider
+     * @param {string} providerType - Provider type identifier
+     * @param {string} uuid - Provider UUID
+     * @returns {Promise<void>}
+     */
+    async deleteToken(providerType, uuid) {
+        throw new Error('StorageAdapter.deleteToken() must be implemented');
+    }
+
     // ==================== UI Password ====================
 
     /**
