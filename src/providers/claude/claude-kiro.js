@@ -549,34 +549,37 @@ async loadCredentials() {
             this.base64Creds = null;
         }
 
-        // 从文件加载 (if Redis didn't have data or as fallback)
-        const targetFilePath = this.credsFilePath || path.join(this.credPath, KIRO_AUTH_TOKEN_FILE);
-        const dirPath = path.dirname(targetFilePath);
-        const targetFileName = path.basename(targetFilePath);
+        // 从文件加载 - 仅当 Redis 没有凭证时才尝试文件加载
+        // Redis-only 架构下，如果 Redis 已有凭证则跳过文件扫描
+        if (!redisCredentials) {
+            const targetFilePath = this.credsFilePath || path.join(this.credPath, KIRO_AUTH_TOKEN_FILE);
+            const dirPath = path.dirname(targetFilePath);
+            const targetFileName = path.basename(targetFilePath);
 
-        console.debug(`[Kiro Auth] Loading credentials from directory: ${dirPath}`);
+            console.debug(`[Kiro Auth] Redis has no credentials, loading from directory: ${dirPath}`);
 
-        try {
-            const targetCredentials = await loadCredentialsFromFile(targetFilePath);
-            if (targetCredentials) {
-                Object.assign(mergedCredentials, targetCredentials);
-                console.info(`[Kiro Auth] Successfully loaded OAuth credentials from ${targetFilePath}`);
-            }
+            try {
+                const targetCredentials = await loadCredentialsFromFile(targetFilePath);
+                if (targetCredentials) {
+                    Object.assign(mergedCredentials, targetCredentials);
+                    console.info(`[Kiro Auth] Successfully loaded OAuth credentials from ${targetFilePath}`);
+                }
 
-            const files = await fs.readdir(dirPath);
-            for (const file of files) {
-                if (file.endsWith('.json') && file !== targetFileName) {
-                    const filePath = path.join(dirPath, file);
-                    const credentials = await loadCredentialsFromFile(filePath);
-                    if (credentials) {
-                        credentials.expiresAt = mergedCredentials.expiresAt;
-                        Object.assign(mergedCredentials, credentials);
-                        console.debug(`[Kiro Auth] Loaded Client credentials from ${file}`);
+                const files = await fs.readdir(dirPath);
+                for (const file of files) {
+                    if (file.endsWith('.json') && file !== targetFileName) {
+                        const filePath = path.join(dirPath, file);
+                        const credentials = await loadCredentialsFromFile(filePath);
+                        if (credentials) {
+                            credentials.expiresAt = mergedCredentials.expiresAt;
+                            Object.assign(mergedCredentials, credentials);
+                            console.debug(`[Kiro Auth] Loaded Client credentials from ${file}`);
+                        }
                     }
                 }
+            } catch (error) {
+                console.warn(`[Kiro Auth] Error loading credentials from directory ${dirPath}: ${error.message}`);
             }
-        } catch (error) {
-            console.warn(`[Kiro Auth] Error loading credentials from directory ${dirPath}: ${error.message}`);
         }
 
         // Apply loaded credentials
