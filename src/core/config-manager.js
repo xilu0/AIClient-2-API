@@ -207,22 +207,9 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
     }
     currentConfig.SYSTEM_PROMPT_CONTENT = await getSystemPromptFileContent(currentConfig.SYSTEM_PROMPT_FILE_PATH);
 
-    // 加载号池配置
-    if (!currentConfig.PROVIDER_POOLS_FILE_PATH) {
-        currentConfig.PROVIDER_POOLS_FILE_PATH = 'configs/provider_pools.json';
-    }
-    if (currentConfig.PROVIDER_POOLS_FILE_PATH) {
-        try {
-            const poolsData = await pfs.readFile(currentConfig.PROVIDER_POOLS_FILE_PATH, 'utf8');
-            currentConfig.providerPools = JSON.parse(poolsData);
-            console.log(`[Config] Loaded provider pools from ${currentConfig.PROVIDER_POOLS_FILE_PATH}`);
-        } catch (error) {
-            console.error(`[Config Error] Failed to load provider pools from ${currentConfig.PROVIDER_POOLS_FILE_PATH}: ${error.message}`);
-            currentConfig.providerPools = {};
-        }
-    } else {
-        currentConfig.providerPools = {};
-    }
+    // Provider pools 将从 Redis storage adapter 加载
+    // 不再使用 provider_pools.json 文件
+    currentConfig.providerPools = {};
 
     // Set PROMPT_LOG_FILENAME based on the determined config
     if (currentConfig.PROMPT_LOG_MODE === 'file') {

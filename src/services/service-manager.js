@@ -200,21 +200,27 @@ async function scanProviderDirectory(dirPath, linkedPaths, newProviders, options
  */
 export async function initApiService(config, isReady = false) {
 
-    // If provider pools from file is empty but Redis is enabled, try to load from Redis
-    if ((!config.providerPools || Object.keys(config.providerPools).length === 0) &&
-        isStorageInitialized()) {
+    // Load provider pools from storage adapter (Redis or File)
+    if (isStorageInitialized()) {
         const adapter = getStorageAdapter();
-        if (adapter && adapter.getType() === 'redis') {
+        if (adapter) {
             try {
-                const redisPools = await adapter.getProviderPools();
-                if (redisPools && Object.keys(redisPools).length > 0) {
-                    config.providerPools = redisPools;
-                    console.log(`[Initialization] Loaded ${Object.keys(redisPools).length} provider pool types from Redis storage`);
+                const pools = await adapter.getProviderPools();
+                if (pools && Object.keys(pools).length > 0) {
+                    config.providerPools = pools;
+                    console.log(`[Initialization] Loaded ${Object.keys(pools).length} provider pool types from ${adapter.getType()} storage`);
+                } else {
+                    console.warn(`[Initialization] Storage adapter returned empty provider pools (${adapter.getType()} mode)`);
+                    config.providerPools = {};
                 }
             } catch (error) {
-                console.error(`[Initialization] Failed to load provider pools from Redis: ${error.message}`);
+                console.error(`[Initialization] Failed to load provider pools from storage adapter: ${error.message}`);
+                config.providerPools = {};
             }
         }
+    } else {
+        console.warn('[Initialization] Storage adapter not initialized, using empty provider pools');
+        config.providerPools = {};
     }
 
     if (config.providerPools && Object.keys(config.providerPools).length > 0) {

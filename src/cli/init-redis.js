@@ -13,6 +13,7 @@
  *   --redis-url <url>     Redis connection URL (default: redis://localhost:6379)
  *   --key-prefix <prefix> Redis key prefix (default: aiclient:)
  *   --api-key <key>       API key for authentication (default: random)
+ *   --password <pwd>      Web UI password (default: admin123)
  *   --port <port>         Server port (default: 3000)
  *   --force               Overwrite existing data
  *   --dry-run             Show what would be created without making changes
@@ -51,6 +52,7 @@ function parseArgs(args) {
         redisUrl: 'redis://localhost:6379',
         keyPrefix: 'aiclient:',
         apiKey: null,
+        password: 'admin123',
         port: 3000,
         force: false,
         dryRun: false,
@@ -68,6 +70,9 @@ function parseArgs(args) {
                 break;
             case '--api-key':
                 options.apiKey = args[++i];
+                break;
+            case '--password':
+                options.password = args[++i];
                 break;
             case '--port':
                 options.port = parseInt(args[++i], 10);
@@ -110,6 +115,7 @@ Options:
   --redis-url <url>     Redis connection URL (default: redis://localhost:6379)
   --key-prefix <prefix> Redis key prefix (default: aiclient:)
   --api-key <key>       API key for authentication (default: randomly generated)
+  --password <pwd>      Web UI password (default: admin123)
   --port <port>         Server port (default: 3000)
   --force               Overwrite existing data
   --dry-run             Show what would be created without making changes
@@ -191,6 +197,7 @@ async function initializeRedis(redis, options) {
     const results = {
         config: false,
         plugins: false,
+        password: false,
         meta: false
     };
 
@@ -229,6 +236,24 @@ async function initializeRedis(redis, options) {
             log(`  Created default plugins config`, 'green');
         }
         results.plugins = true;
+    }
+
+    // Initialize password
+    const pwdKey = `${keyPrefix}pwd`;
+    const pwdExists = await redis.exists(pwdKey);
+
+    if (pwdExists && !options.force) {
+        log(`  Skipping password (already exists, use --force to overwrite)`, 'yellow');
+    } else {
+        if (options.dryRun) {
+            log(`  [DRY RUN] Would create web UI password`, 'cyan');
+            log(`    Password: ${options.password}`, 'dim');
+        } else {
+            await redis.set(pwdKey, options.password);
+            log(`  Created web UI password`, 'green');
+            log(`    Password: ${options.password}`, 'dim');
+        }
+        results.password = true;
     }
 
     // Initialize metadata
@@ -304,6 +329,7 @@ async function main() {
         log('\n=== Initialization Summary ===', 'cyan');
         log(`Config: ${results.config ? 'created' : 'skipped'}`);
         log(`Plugins: ${results.plugins ? 'created' : 'skipped'}`);
+        log(`Password: ${results.password ? 'created' : 'skipped'}`);
         log(`Metadata: ${results.meta ? 'created' : 'skipped'}`);
 
         if (options.dryRun) {

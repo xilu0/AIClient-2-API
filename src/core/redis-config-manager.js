@@ -272,8 +272,8 @@ class RedisConfigManager extends StorageAdapter {
 
             if (keys.length === 0) {
                 console.warn('[RedisConfig] ⚠️  Redis is connected but empty - no configuration data found');
-                console.warn('[RedisConfig] If migrating from file storage, run: npm run migrate:redis');
-                console.warn('[RedisConfig] Until migration, file-based configuration will be used as fallback');
+                console.warn('[RedisConfig] To migrate existing data from file storage, run: npm run migrate:redis');
+                console.warn('[RedisConfig] All data operations will return empty until migration is completed');
             } else {
                 console.log(`[RedisConfig] Found ${keys.length} configuration keys in Redis`);
 
@@ -370,11 +370,7 @@ class RedisConfigManager extends StorageAdapter {
 
         const client = this.redisManager.getClient();
         if (!client || !this.redisManager.isConnected()) {
-            // Fallback to file adapter
-            if (this.fileAdapter) {
-                console.debug('[RedisConfig] Using file fallback for getConfig');
-                return this.fileAdapter.getConfig();
-            }
+            console.warn('[RedisConfig] Redis not connected, returning empty config');
             return {};
         }
 
@@ -388,9 +384,6 @@ class RedisConfigManager extends StorageAdapter {
             return {};
         } catch (error) {
             console.error('[RedisConfig] Failed to get config:', error.message);
-            if (this.fileAdapter) {
-                return this.fileAdapter.getConfig();
-            }
             return {};
         }
     }
@@ -417,22 +410,19 @@ class RedisConfigManager extends StorageAdapter {
             return this._poolsCache;
         }
 
-        // If there are queued writes, prefer file as source of truth
+        // If there are queued writes, warn and use cache if available
         // because Redis data may be stale (writes haven't been applied yet)
-        if (this.writeQueue.size > 0 && this.fileAdapter) {
-            console.debug(`[RedisConfig] ${this.writeQueue.size} queued writes, using file as source of truth`);
-            const pools = await this.fileAdapter.getProviderPools();
-            this._poolsCache = pools;
-            this._poolsCacheTime = Date.now();
-            return pools;
+        if (this.writeQueue.size > 0) {
+            console.warn(`[RedisConfig] ${this.writeQueue.size} queued writes, Redis data may be stale`);
+            if (this._poolsCache) {
+                console.debug('[RedisConfig] Using cached data due to queued writes');
+                return this._poolsCache;
+            }
         }
 
         const client = this.redisManager.getClient();
         if (!client || !this.redisManager.isConnected()) {
-            if (this.fileAdapter) {
-                console.debug('[RedisConfig] Using file fallback for getProviderPools');
-                return this.fileAdapter.getProviderPools();
-            }
+            console.warn('[RedisConfig] Redis not connected, returning empty pools');
             return {};
         }
 
@@ -453,9 +443,6 @@ class RedisConfigManager extends StorageAdapter {
             return pools;
         } catch (error) {
             console.error('[RedisConfig] Failed to get provider pools:', error.message);
-            if (this.fileAdapter) {
-                return this.fileAdapter.getProviderPools();
-            }
             return {};
         }
     }
@@ -463,9 +450,7 @@ class RedisConfigManager extends StorageAdapter {
     async getProviderPool(providerType) {
         const client = this.redisManager.getClient();
         if (!client || !this.redisManager.isConnected()) {
-            if (this.fileAdapter) {
-                return this.fileAdapter.getProviderPool(providerType);
-            }
+            console.warn(`[RedisConfig] Redis not connected, returning empty pool for ${providerType}`);
             return [];
         }
 
@@ -474,9 +459,6 @@ class RedisConfigManager extends StorageAdapter {
             return Object.values(providers).map(p => JSON.parse(p));
         } catch (error) {
             console.error(`[RedisConfig] Failed to get provider pool ${providerType}:`, error.message);
-            if (this.fileAdapter) {
-                return this.fileAdapter.getProviderPool(providerType);
-            }
             return [];
         }
     }
@@ -506,9 +488,7 @@ class RedisConfigManager extends StorageAdapter {
     async getProvider(providerType, uuid) {
         const client = this.redisManager.getClient();
         if (!client || !this.redisManager.isConnected()) {
-            if (this.fileAdapter) {
-                return this.fileAdapter.getProvider(providerType, uuid);
-            }
+            console.warn(`[RedisConfig] Redis not connected, returning null for provider ${uuid}`);
             return null;
         }
 
@@ -517,9 +497,6 @@ class RedisConfigManager extends StorageAdapter {
             return data ? JSON.parse(data) : null;
         } catch (error) {
             console.error(`[RedisConfig] Failed to get provider ${uuid}:`, error.message);
-            if (this.fileAdapter) {
-                return this.fileAdapter.getProvider(providerType, uuid);
-            }
             return null;
         }
     }

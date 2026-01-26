@@ -1,6 +1,6 @@
 /**
  * Storage Adapter Factory
- * Creates the appropriate storage adapter based on configuration.
+ * Creates Redis storage adapter only. Provider pools must be stored in Redis.
  * @module storage-factory
  */
 
@@ -14,15 +14,14 @@ let storageAdapter = null;
 let initialized = false;
 
 /**
- * Create and initialize the storage adapter based on configuration.
- * Uses Redis if enabled and connected, falls back to file storage.
+ * Create and initialize Redis storage adapter.
+ * Redis is required for provider pools storage.
  *
  * @param {Object} config - Configuration object
  * @param {Object} [config.redis] - Redis configuration
  * @param {boolean} [config.redis.enabled] - Whether Redis is enabled
  * @param {string} [config.redis.url] - Redis URL
- * @param {string} [config.configPath] - Path to config.json
- * @param {string} [config.poolsPath] - Path to provider_pools.json
+ * @param {string} [config.configPath] - Path to config.json (for file backup only)
  * @returns {Promise<import('./storage-adapter.js').StorageAdapter>}
  */
 async function createStorageAdapter(config = {}) {
@@ -32,59 +31,56 @@ async function createStorageAdapter(config = {}) {
 
     const redisConfig = config.redis || {};
 
-    // Check if Redis is enabled via config or environment
-    const redisEnabled = redisConfig.enabled || process.env.REDIS_ENABLED === 'true';
+    // Redis is always enabled now (provider_pools.json removed)
+    // Check config first, then environment variable
+    const redisEnabled = redisConfig.enabled !== false &&
+                        (redisConfig.enabled === true || process.env.REDIS_ENABLED === 'true');
 
-    if (redisEnabled) {
-        console.log('[Storage] Redis storage enabled, attempting connection...');
-
-        try {
-            // Initialize Redis client
-            const connected = await redisClientManager.initialize(redisConfig);
-
-            if (connected) {
-                console.log('[Storage] Redis connection established successfully');
-
-                // Create file adapter for fallback operations
-                const fileAdapter = new FileStorageAdapter({
-                    configPath: config.configPath,
-                    poolsPath: config.poolsPath,
-                });
-
-                // Dynamically import RedisConfigManager to avoid circular dependencies
-                const { RedisConfigManager } = await import('./redis-config-manager.js');
-                storageAdapter = new RedisConfigManager(redisClientManager, {
-                    keyPrefix: redisConfig.keyPrefix || redisClientManager.getKeyPrefix(),
-                    fileAdapter,
-                });
-
-                // Check if Redis has data (for migration hints)
-                await storageAdapter.checkEmptyAndWarn();
-
-                console.log('[Storage] Redis storage adapter initialized with file fallback');
-                initialized = true;
-                return storageAdapter;
-            } else {
-                console.warn('[Storage] Redis connection failed - Redis may be unavailable');
-            }
-        } catch (error) {
-            console.error('[Storage] Failed to initialize Redis storage:', error.message);
-            console.warn('[Storage] Service will continue with file-based storage');
-        }
-
-        console.log('[Storage] Falling back to file storage (Redis unavailable)...');
-    } else {
-        console.log('[Storage] Redis storage disabled, using file storage');
+    if (!redisEnabled) {
+        console.error('[Storage] ❌ Redis storage is disabled but required!');
+        console.error('[Storage] Provider pools require Redis storage (provider_pools.json removed)');
+        console.error('[Storage] Please enable Redis in config.json or set REDIS_ENABLED=true');
+        throw new Error('Redis storage is required but disabled');
     }
 
-    // Fall back to file storage
-    storageAdapter = new FileStorageAdapter({
-        configPath: config.configPath,
-        poolsPath: config.poolsPath,
-    });
-    console.log('[Storage] File storage adapter initialized');
-    initialized = true;
-    return storageAdapter;
+    console.log('[Storage] Redis storage enabled, attempting connection...');
+
+    try {
+        // Initialize Redis client
+        const connected = await redisClientManager.initialize(redisConfig);
+
+        if (!connected) {
+            console.error('[Storage] ❌ Redis connection failed!');
+            console.error('[Storage] Provider pools require Redis storage');
+            console.error('[Storage] Please ensure Redis is running at:', redisConfig.url || `${redisConfig.host || 'localhost'}:${redisConfig.port || 6379}`);
+            throw new Error('Redis connection failed');
+        }
+
+        console.log('[Storage] Redis connection established successfully');
+
+        // Create file adapter ONLY for config.json backup (NOT for provider pools)
+        const fileAdapter = new FileStorageAdapter({
+            configPath: config.configPath,
+            poolsPath: null, // No longer use provider_pools.json
+        });
+
+        // Dynamically import RedisConfigManager to avoid circular dependencies
+        const { RedisConfigManager } = await import('./redis-config-manager.js');
+        storageAdapter = new RedisConfigManager(redisClientManager, {
+            keyPrefix: redisConfig.keyPrefix || redisClientManager.getKeyPrefix(),
+            fileAdapter,
+        });
+
+        // Check if Redis has data (for migration hints)
+        await storageAdapter.checkEmptyAndWarn();
+
+        console.log('[Storage] Redis storage adapter initialized (config file backup enabled)');
+        initialized = true;
+        return storageAdapter;
+    } catch (error) {
+        console.error('[Storage] Failed to initialize Redis storage:', error.message);
+        throw error;
+    }
 }
 
 /**
