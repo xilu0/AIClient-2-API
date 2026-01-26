@@ -13,6 +13,12 @@ function getAdapter() {
     if (isStorageInitialized()) {
         return getStorageAdapter();
     }
+
+    // Check if storage adapter is required (strict mode)
+    if (process.env.REQUIRE_STORAGE_ADAPTER === 'true') {
+        throw new Error('[UI API] Storage adapter is required but not initialized. Set REQUIRE_STORAGE_ADAPTER=false to allow file fallback.');
+    }
+
     return null;
 }
 
@@ -150,6 +156,7 @@ export async function handleAddProvider(req, res, currentConfig, providerPoolMan
         // Fallback to direct file storage only if no adapter is available
         // When adapter exists (Redis or File), it handles all storage operations including backups
         if (!adapter) {
+            console.warn('⚠️  [UI API] FALLBACK MODE: No storage adapter available, using direct file I/O. This should not happen in production!');
             let providerPools = {};
             // Load existing pools
             if (existsSync(filePath)) {
@@ -296,6 +303,7 @@ export async function handleUpdateProvider(req, res, currentConfig, providerPool
 
         // Fallback to direct file storage only if no adapter is available
         if (!adapter) {
+            console.warn('⚠️  [UI API] FALLBACK MODE: No storage adapter available, using direct file I/O. This should not happen in production!');
             if (Object.keys(providerPools).length === 0 && existsSync(filePath)) {
                 providerPools = JSON.parse(readFileSync(filePath, 'utf-8'));
             }
@@ -391,6 +399,7 @@ export async function handleDeleteProvider(req, res, currentConfig, providerPool
         // Fallback to direct file storage only if no adapter is available
         // When adapter exists (Redis or File), it handles all storage operations including backups
         if (!adapter) {
+            console.warn('⚠️  [UI API] FALLBACK MODE: No storage adapter available, using direct file I/O. This should not happen in production!');
             if (Object.keys(providerPools).length === 0 && existsSync(filePath)) {
                 providerPools = JSON.parse(readFileSync(filePath, 'utf-8'));
             }
@@ -491,6 +500,7 @@ export async function handleDisableEnableProvider(req, res, currentConfig, provi
 
         // Fallback to direct file storage only if no adapter is available
         if (!adapter) {
+            console.warn('⚠️  [UI API] FALLBACK MODE: No storage adapter available, using direct file I/O. This should not happen in production!');
             let providerPools = {};
             if (existsSync(filePath)) {
                 providerPools = JSON.parse(readFileSync(filePath, 'utf-8'));
@@ -615,6 +625,7 @@ export async function handleResetProviderHealth(req, res, currentConfig, provide
 
         // Fallback to direct file storage only if no adapter is available
         if (!adapter) {
+            console.warn('⚠️  [UI API] FALLBACK MODE: No storage adapter available, using direct file I/O. This should not happen in production!');
             let providerPools = {};
             if (existsSync(filePath)) {
                 providerPools = JSON.parse(readFileSync(filePath, 'utf-8'));
@@ -729,6 +740,7 @@ export async function handleDeleteUnhealthyProviders(req, res, currentConfig, pr
 
         // Fallback to direct file storage only if no adapter is available
         if (!adapter) {
+            console.warn('⚠️  [UI API] FALLBACK MODE: No storage adapter available, using direct file I/O. This should not happen in production!');
             if (existsSync(filePath)) {
                 try {
                     const fileContent = readFileSync(filePath, 'utf-8');
@@ -866,6 +878,7 @@ export async function handleRefreshUnhealthyUuids(req, res, currentConfig, provi
 
         // Fallback to direct file storage only if no adapter is available
         if (!adapter) {
+            console.warn('⚠️  [UI API] FALLBACK MODE: No storage adapter available, using direct file I/O. This should not happen in production!');
             if (existsSync(filePath)) {
                 try {
                     const fileContent = readFileSync(filePath, 'utf-8');
@@ -1062,6 +1075,7 @@ export async function handleHealthCheck(req, res, currentConfig, providerPoolMan
             }
         } else {
             // Fallback to direct file storage only if no adapter is available
+            console.warn('⚠️  [UI API] FALLBACK MODE: No storage adapter available, using direct file I/O. This should not happen in production!');
             writeFileSync(filePath, JSON.stringify(providerPools, null, 2), 'utf-8');
         }
 
@@ -1192,6 +1206,7 @@ export async function handleQuickLinkProvider(req, res, currentConfig, providerP
 
         // Fallback to direct file storage only if no adapter is available
         if (!adapter) {
+            console.warn('⚠️  [UI API] FALLBACK MODE: No storage adapter available, using direct file I/O. This should not happen in production!');
             providerPools[providerType].push(newProvider);
             writeFileSync(poolsFilePath, JSON.stringify(providerPools, null, 2), 'utf-8');
             console.log(`[UI API] Quick linked config: ${filePath} -> ${providerType}`);
@@ -1298,6 +1313,7 @@ export async function handleRefreshProviderUuid(req, res, currentConfig, provide
 
         // Fallback to direct file storage only if no adapter is available
         if (!adapter) {
+            console.warn('⚠️  [UI API] FALLBACK MODE: No storage adapter available, using direct file I/O. This should not happen in production!');
             let providerPools = {};
             if (existsSync(filePath)) {
                 providerPools = JSON.parse(readFileSync(filePath, 'utf-8'));
