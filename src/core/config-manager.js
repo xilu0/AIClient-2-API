@@ -207,22 +207,14 @@ export async function initializeConfig(args = process.argv.slice(2), configFileP
     }
     currentConfig.SYSTEM_PROMPT_CONTENT = await getSystemPromptFileContent(currentConfig.SYSTEM_PROMPT_FILE_PATH);
 
-    // 加载号池配置
+    // 设置号池配置文件路径（实际数据将从 storage adapter 加载）
     if (!currentConfig.PROVIDER_POOLS_FILE_PATH) {
         currentConfig.PROVIDER_POOLS_FILE_PATH = 'configs/provider_pools.json';
     }
-    if (currentConfig.PROVIDER_POOLS_FILE_PATH) {
-        try {
-            const poolsData = await pfs.readFile(currentConfig.PROVIDER_POOLS_FILE_PATH, 'utf8');
-            currentConfig.providerPools = JSON.parse(poolsData);
-            console.log(`[Config] Loaded provider pools from ${currentConfig.PROVIDER_POOLS_FILE_PATH}`);
-        } catch (error) {
-            console.error(`[Config Error] Failed to load provider pools from ${currentConfig.PROVIDER_POOLS_FILE_PATH}: ${error.message}`);
-            currentConfig.providerPools = {};
-        }
-    } else {
-        currentConfig.providerPools = {};
-    }
+
+    // 不再在配置加载时直接读取文件，而是在 storage adapter 初始化后再加载
+    // 这样可以确保使用正确的数据源（Redis 或文件）
+    currentConfig.providerPools = {};
 
     // Set PROMPT_LOG_FILENAME based on the determined config
     if (currentConfig.PROMPT_LOG_MODE === 'file') {
