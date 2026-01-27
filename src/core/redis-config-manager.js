@@ -428,15 +428,32 @@ class RedisConfigManager extends StorageAdapter {
         }
 
         try {
-            // Get all pool keys
-            const keys = await client.keys(this._key('pools:*'));
+            // P1 Fix: Use SMEMBERS instead of KEYS to avoid O(N) blocking scan
+            // SMEMBERS is O(M) where M is the number of provider types (typically < 10)
+            const types = await client.smembers(this._key('pool-types'));
             const pools = {};
 
-            for (const key of keys) {
-                const providerType = key.replace(this._key('pools:'), '');
-                const providers = await client.hgetall(key);
-
-                pools[providerType] = Object.values(providers).map(p => JSON.parse(p));
+            // If pool-types set is empty, fall back to KEYS scan (for backward compatibility)
+            // This handles the case where Redis was populated before this fix
+            if (types.length === 0) {
+                const keys = await client.keys(this._key('pools:*'));
+                if (keys.length > 0) {
+                    console.log('[RedisConfig] Migrating to pool-types set for faster lookups...');
+                    const multi = client.multi();
+                    for (const key of keys) {
+                        const providerType = key.replace(this._key('pools:'), '');
+                        multi.sadd(this._key('pool-types'), providerType);
+                        const providers = await client.hgetall(key);
+                        pools[providerType] = Object.values(providers).map(p => JSON.parse(p));
+                    }
+                    await multi.exec();
+                    console.log(`[RedisConfig] Migrated ${keys.length} provider types to pool-types set`);
+                }
+            } else {
+                for (const providerType of types) {
+                    const providers = await client.hgetall(this._key(`pools:${providerType}`));
+                    pools[providerType] = Object.values(providers).map(p => JSON.parse(p));
+                }
             }
 
             this._poolsCache = pools;
@@ -481,7 +498,12 @@ class RedisConfigManager extends StorageAdapter {
                 for (const provider of providers) {
                     multi.hset(key, provider.uuid, JSON.stringify(provider));
                 }
+                // P1 Fix: Maintain pool-types set for fast lookups
+                multi.sadd(this._key('pool-types'), providerType);
                 await multi.exec();
+            } else {
+                // P1 Fix: Remove from pool-types set if pool is empty
+                await client.srem(this._key('pool-types'), providerType);
             }
         }, `setProviderPool:${providerType}`);
     }
@@ -510,8 +532,14 @@ class RedisConfigManager extends StorageAdapter {
      * @returns {Promise<{queued: boolean}>} Status indicating if operation was queued
      */
     async updateProvider(providerType, uuid, updates) {
-        // Invalidate cache
-        this._poolsCache = null;
+        // P0 Fix: Update in-memory cache instead of invalidating
+        // This prevents cache stampede under high concurrency
+        if (this._poolsCache && this._poolsCache[providerType]) {
+            const provider = this._poolsCache[providerType].find(p => p.uuid === uuid);
+            if (provider) {
+                Object.assign(provider, updates);
+            }
+        }
 
         let executeResult = { queued: false };
         try {
@@ -614,10 +642,17 @@ class RedisConfigManager extends StorageAdapter {
     // ==================== Atomic Counter Operations ====================
 
     async incrementUsage(providerType, uuid) {
-        // Invalidate cache
-        this._poolsCache = null;
-
+        // P0 Fix: Update in-memory cache instead of invalidating
+        // This prevents cache stampede under high concurrency
         const timestamp = new Date().toISOString();
+        if (this._poolsCache && this._poolsCache[providerType]) {
+            const provider = this._poolsCache[providerType].find(p => p.uuid === uuid);
+            if (provider) {
+                provider.usageCount = (provider.usageCount || 0) + 1;
+                provider.lastUsed = timestamp;
+            }
+        }
+
         const executeResult = await this._execute(async (client) => {
             return await client.atomicUsageUpdate(
                 this._key(`pools:${providerType}`),
@@ -630,10 +665,20 @@ class RedisConfigManager extends StorageAdapter {
     }
 
     async incrementError(providerType, uuid, markUnhealthy = false) {
-        // Invalidate cache
-        this._poolsCache = null;
-
+        // P0 Fix: Update in-memory cache instead of invalidating
+        // This prevents cache stampede under high concurrency
         const timestamp = new Date().toISOString();
+        if (this._poolsCache && this._poolsCache[providerType]) {
+            const provider = this._poolsCache[providerType].find(p => p.uuid === uuid);
+            if (provider) {
+                provider.errorCount = (provider.errorCount || 0) + 1;
+                provider.lastErrorTime = timestamp;
+                if (markUnhealthy) {
+                    provider.isHealthy = false;
+                }
+            }
+        }
+
         const executeResult = await this._execute(async (client) => {
             return await client.atomicErrorUpdate(
                 this._key(`pools:${providerType}`),
@@ -647,10 +692,17 @@ class RedisConfigManager extends StorageAdapter {
     }
 
     async updateHealthStatus(providerType, uuid, isHealthy) {
-        // Invalidate cache
-        this._poolsCache = null;
-
+        // P0 Fix: Update in-memory cache instead of invalidating
+        // This prevents cache stampede under high concurrency
         const timestamp = new Date().toISOString();
+        if (this._poolsCache && this._poolsCache[providerType]) {
+            const provider = this._poolsCache[providerType].find(p => p.uuid === uuid);
+            if (provider) {
+                provider.isHealthy = isHealthy;
+                provider.lastHealthCheckTime = timestamp;
+            }
+        }
+
         await this._execute(async (client) => {
             await client.atomicHealthUpdate(
                 this._key(`pools:${providerType}`),
@@ -1101,6 +1153,9 @@ class RedisConfigManager extends StorageAdapter {
         await this._execute(async (client) => {
             const multi = client.multi();
 
+            // P1 Fix: Clear and rebuild pool-types set
+            multi.del(this._key('pool-types'));
+
             for (const [providerType, providers] of Object.entries(pools)) {
                 const key = this._key(`pools:${providerType}`);
                 multi.del(key);
@@ -1108,6 +1163,8 @@ class RedisConfigManager extends StorageAdapter {
                     for (const provider of providers) {
                         multi.hset(key, provider.uuid, JSON.stringify(provider));
                     }
+                    // P1 Fix: Add to pool-types set
+                    multi.sadd(this._key('pool-types'), providerType);
                 }
             }
 
