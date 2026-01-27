@@ -161,12 +161,69 @@ async function saveKiroTokenToRedis(tokenData, options = {}) {
         if (!options.skipDuplicateCheck && tokenData.refreshToken) {
             const duplicateCheck = await storage.checkKiroRefreshTokenExists(tokenData.refreshToken);
             if (duplicateCheck.isDuplicate) {
-                console.log(`${KIRO_OAUTH_CONFIG.logPrefix} Duplicate refreshToken detected, existing UUID: ${duplicateCheck.existingUuid}`);
-                return {
-                    success: false,
-                    duplicate: true,
-                    existingUuid: duplicateCheck.existingUuid
-                };
+                const existingUuid = duplicateCheck.existingUuid;
+                const existingToken = duplicateCheck.existingToken;
+
+                console.log(`${KIRO_OAUTH_CONFIG.logPrefix} Duplicate refreshToken detected, existing UUID: ${existingUuid}`);
+
+                // 智能覆盖逻辑：比较新旧 token 的过期时间
+                let shouldReplace = false;
+                let replaceReason = '';
+
+                if (!existingToken) {
+                    // 索引存在但 token 数据缺失（孤儿索引）
+                    shouldReplace = true;
+                    replaceReason = 'orphaned index (token data missing)';
+                } else if (!existingToken.expiresAt) {
+                    // 旧 token 没有过期时间，用新的替换
+                    shouldReplace = true;
+                    replaceReason = 'existing token has no expiration';
+                } else {
+                    const existingExpiry = new Date(existingToken.expiresAt);
+                    const newExpiry = tokenData.expiresAt ? new Date(tokenData.expiresAt) : null;
+                    const now = new Date();
+
+                    if (existingExpiry < now) {
+                        // 旧 token 已过期
+                        shouldReplace = true;
+                        replaceReason = 'existing token expired';
+                    } else if (newExpiry && newExpiry > existingExpiry) {
+                        // 新 token 更新鲜
+                        shouldReplace = true;
+                        replaceReason = `new token is fresher (${newExpiry.toISOString()} > ${existingExpiry.toISOString()})`;
+                    }
+                }
+
+                if (shouldReplace) {
+                    console.log(`${KIRO_OAUTH_CONFIG.logPrefix} Replacing existing token: ${replaceReason}`);
+
+                    // 删除旧的 provider 条目（如果存在）
+                    const deleteProviderResult = await storage.deleteProvider(providerType, existingUuid);
+                    if (deleteProviderResult.success) {
+                        console.log(`${KIRO_OAUTH_CONFIG.logPrefix} Deleted old provider entry: ${existingUuid}`);
+                    }
+
+                    // 删除旧的 token（会同时删除索引）
+                    const deleteTokenResult = await storage.deleteKiroToken(existingUuid);
+                    if (deleteTokenResult.success) {
+                        console.log(`${KIRO_OAUTH_CONFIG.logPrefix} Deleted old token and index: ${existingUuid}`);
+                    }
+
+                    // 继续保存新 token（下面的代码会执行）
+                } else {
+                    // 旧 token 仍然有效且更新鲜，返回重复错误
+                    const existingExpiry = existingToken.expiresAt ? new Date(existingToken.expiresAt) : null;
+                    const newExpiry = tokenData.expiresAt ? new Date(tokenData.expiresAt) : null;
+
+                    console.log(`${KIRO_OAUTH_CONFIG.logPrefix} Keeping existing token (existing: ${existingExpiry?.toISOString()}, new: ${newExpiry?.toISOString()})`);
+
+                    return {
+                        success: false,
+                        duplicate: true,
+                        existingUuid: duplicateCheck.existingUuid,
+                        message: 'Existing token is still valid and fresher'
+                    };
+                }
             }
         }
 
@@ -197,7 +254,11 @@ async function saveKiroTokenToRedis(tokenData, options = {}) {
             addedAt: new Date().toISOString()
         };
 
-        await storage.addProvider(providerType, provider);
+        const addResult = await storage.addProvider(providerType, provider);
+        if (!addResult.success) {
+            console.error(`${KIRO_OAUTH_CONFIG.logPrefix} Failed to add provider to Redis: ${addResult.error}`);
+            return { success: false, error: addResult.error || 'Failed to add provider to Redis' };
+        }
         console.log(`${KIRO_OAUTH_CONFIG.logPrefix} Token saved to Redis, UUID: ${uuid}`);
 
         // 更新 providerPoolManager 的内存状态

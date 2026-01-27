@@ -142,11 +142,27 @@ export async function handleAddProvider(req, res, currentConfig, providerPoolMan
         // Use storage adapter if available
         if (adapter) {
             try {
-                await adapter.addProvider(providerType, providerConfig);
+                const addResult = await adapter.addProvider(providerType, providerConfig);
+                if (!addResult.success) {
+                    console.error(`[UI API] Redis write failed for add provider: ${addResult.error}`);
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        error: {
+                            message: `Failed to save to Redis: ${addResult.error || 'Unknown error'}. Please check Redis connection.`
+                        }
+                    }));
+                    return true;
+                }
                 console.log(`[UI API] Added new provider to ${providerType} via ${adapter.getType()}: ${providerConfig.uuid}`);
             } catch (adapterError) {
                 console.error('[UI API] Storage adapter add failed:', adapterError.message);
-                // Fall through to file-based storage
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    error: {
+                        message: `Storage adapter error: ${adapterError.message}`
+                    }
+                }));
+                return true;
             }
         }
 
@@ -846,6 +862,7 @@ export async function handleRefreshUnhealthyUuids(req, res, currentConfig, provi
 
         // Filter unhealthy providers and refresh their UUIDs
         const refreshedProviders = [];
+        const failedProviders = [];
         for (const provider of providers) {
             if (!provider.isHealthy) {
                 const oldUuid = provider.uuid;
@@ -862,11 +879,19 @@ export async function handleRefreshUnhealthyUuids(req, res, currentConfig, provi
                         }
                         await adapter.deleteProvider(providerType, oldUuid);
                         provider.uuid = newUuid;
-                        await adapter.addProvider(providerType, provider);
+                        const addResult = await adapter.addProvider(providerType, provider);
+                        if (!addResult.success) {
+                            console.error(`[UI API] Redis write failed for UUID refresh ${oldUuid}: ${addResult.error}`);
+                            failedProviders.push({ oldUuid, error: addResult.error });
+                            provider.uuid = oldUuid; // Revert UUID change
+                            continue;
+                        }
                         console.log(`[UI API] Refreshed UUID ${oldUuid} -> ${newUuid} via ${adapter.getType()}`);
                     } catch (adapterError) {
                         console.error(`[UI API] Storage adapter UUID refresh failed for ${oldUuid}:`, adapterError.message);
-                        provider.uuid = newUuid; // Still update in memory
+                        failedProviders.push({ oldUuid, error: adapterError.message });
+                        provider.uuid = oldUuid; // Revert UUID change
+                        continue;
                     }
                 } else {
                     provider.uuid = newUuid;
@@ -1212,10 +1237,27 @@ export async function handleQuickLinkProvider(req, res, currentConfig, providerP
         // Use storage adapter if available
         if (adapter) {
             try {
-                await adapter.addProvider(providerType, newProvider);
+                const addResult = await adapter.addProvider(providerType, newProvider);
+                if (!addResult.success) {
+                    console.error(`[UI API] Redis write failed for quick link: ${addResult.error}`);
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        error: {
+                            message: `Failed to save to Redis: ${addResult.error || 'Unknown error'}. Please check Redis connection.`
+                        }
+                    }));
+                    return true;
+                }
                 console.log(`[UI API] Quick linked config via ${adapter.getType()}: ${filePath} -> ${providerType}`);
             } catch (adapterError) {
                 console.error('[UI API] Storage adapter add failed:', adapterError.message);
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    error: {
+                        message: `Storage adapter error: ${adapterError.message}`
+                    }
+                }));
+                return true;
             }
         }
 
@@ -1318,11 +1360,27 @@ export async function handleRefreshProviderUuid(req, res, currentConfig, provide
             try {
                 await adapter.deleteProvider(providerType, oldUuid);
                 provider.uuid = newUuid;
-                await adapter.addProvider(providerType, provider);
+                const addResult = await adapter.addProvider(providerType, provider);
+                if (!addResult.success) {
+                    console.error(`[UI API] Redis write failed for UUID refresh: ${addResult.error}`);
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        error: {
+                            message: `Failed to save to Redis: ${addResult.error || 'Unknown error'}. Please check Redis connection.`
+                        }
+                    }));
+                    return true;
+                }
                 console.log(`[UI API] Refreshed UUID via ${adapter.getType()}: ${oldUuid} -> ${newUuid}`);
             } catch (adapterError) {
                 console.error('[UI API] Storage adapter UUID refresh failed:', adapterError.message);
-                provider.uuid = newUuid; // Still update in memory
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    error: {
+                        message: `Storage adapter error: ${adapterError.message}`
+                    }
+                }));
+                return true;
             }
         }
 

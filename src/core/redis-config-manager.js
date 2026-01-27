@@ -572,13 +572,16 @@ class RedisConfigManager extends StorageAdapter {
      * Add a provider to Redis and sync to file backup
      * @param {string} providerType - The provider type
      * @param {Object} provider - The provider configuration
-     * @returns {Promise<{queued: boolean}>} Status indicating if operation was queued
+     * @returns {Promise<{success: boolean, queued: boolean, error?: string}>} Status indicating if operation succeeded
      */
     async addProvider(providerType, provider) {
         // Invalidate cache
         this._poolsCache = null;
 
+        let redisSuccess = false;
+        let redisError = null;
         let executeResult = { queued: false };
+
         try {
             executeResult = await this._execute(async (client) => {
                 await client.hset(
@@ -587,12 +590,14 @@ class RedisConfigManager extends StorageAdapter {
                     JSON.stringify(provider)
                 );
             }, `addProvider:${providerType}:${provider.uuid}`);
-        } catch (redisError) {
-            console.error(`[RedisConfig] Redis add failed for ${provider.uuid}: ${redisError.message}`);
+            redisSuccess = !executeResult.queued;
+        } catch (err) {
+            console.error(`[RedisConfig] Redis add failed for ${provider.uuid}: ${err.message}`);
+            redisError = err.message;
             executeResult = { queued: true };
         }
 
-        // ALWAYS sync to file backup regardless of Redis result
+        // Sync to file backup regardless of Redis result (for disaster recovery)
         if (this.fileAdapter) {
             try {
                 await this.fileAdapter.addProvider(providerType, provider);
@@ -602,7 +607,18 @@ class RedisConfigManager extends StorageAdapter {
             }
         }
 
-        return { queued: executeResult.queued };
+        // Return success status based on Redis write result
+        // If Redis failed or queued, caller should be aware
+        if (!redisSuccess) {
+            console.error(`[RedisConfig] Provider ${provider.uuid} was NOT written to Redis (queued: ${executeResult.queued})`);
+            return {
+                success: false,
+                queued: executeResult.queued,
+                error: redisError || 'Redis write failed or queued'
+            };
+        }
+
+        return { success: true, queued: false };
     }
 
     /**
@@ -947,9 +963,10 @@ class RedisConfigManager extends StorageAdapter {
     /**
      * Check if a Kiro refresh token already exists (for deduplication).
      * @param {string} refreshToken - The refresh token to check
-     * @returns {Promise<{isDuplicate: boolean, existingUuid?: string}>}
+     * @returns {Promise<{isDuplicate: boolean, existingUuid?: string, existingToken?: Object}>}
      */
     async checkKiroRefreshTokenExists(refreshToken) {
+        const providerType = 'claude-kiro-oauth';
         const client = this.redisManager.getClient();
 
         if (!client || !this.redisManager.isConnected()) {
@@ -964,7 +981,18 @@ class RedisConfigManager extends StorageAdapter {
 
             if (existingUuid) {
                 console.log(`[RedisConfig] Found existing Kiro token with UUID: ${existingUuid}`);
-                return { isDuplicate: true, existingUuid };
+
+                // Get the existing token data for comparison
+                const tokenKey = this._key(`tokens:${providerType}:${existingUuid}`);
+                const tokenData = await client.get(tokenKey);
+
+                if (tokenData) {
+                    const existingToken = JSON.parse(tokenData);
+                    return { isDuplicate: true, existingUuid, existingToken };
+                }
+
+                // Token index exists but token data is missing (orphaned index)
+                return { isDuplicate: true, existingUuid, existingToken: null };
             }
 
             return { isDuplicate: false };
