@@ -2036,6 +2036,9 @@ async saveCredentialsToFile(filePath, newData) {
                 throw error;
             }
         }
+
+        // 如果循环自然退出（所有重试都用完），抛出明确的错误
+        throw new Error(`[Kiro] Stream API call failed after ${maxRetries} retries`);
     }
 
     // 保留旧的非流式方法用于 generateContent

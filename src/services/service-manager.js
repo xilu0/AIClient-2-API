@@ -116,16 +116,24 @@ export async function autoLinkProviderConfigs(config) {
             if (isStorageInitialized()) {
                 const storage = getStorageAdapter();
                 // 为每个新 provider 添加到 Redis
+                let failedCount = 0;
                 for (const [displayName, providers] of Object.entries(allNewProviders)) {
                     // 找到对应的 providerType
                     const mapping = PROVIDER_MAPPINGS.find(m => m.displayName === displayName);
                     if (mapping) {
                         for (const provider of providers) {
-                            await storage.addProvider(mapping.providerType, provider);
+                            const addResult = await storage.addProvider(mapping.providerType, provider);
+                            if (!addResult.success) {
+                                console.error(`[Auto-Link] Failed to add provider to Redis: ${addResult.error}`);
+                                failedCount++;
+                            }
                         }
                     }
                 }
-                console.log(`[Auto-Link] Added ${totalNewProviders} new config(s) to Redis provider pools:`);
+                if (failedCount > 0) {
+                    console.warn(`[Auto-Link] ${failedCount} provider(s) failed to save to Redis`);
+                }
+                console.log(`[Auto-Link] Added ${totalNewProviders - failedCount} new config(s) to Redis provider pools:`);
             } else {
                 console.warn('[Auto-Link] Storage not initialized, skipping Redis save');
             }
