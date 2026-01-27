@@ -70,8 +70,38 @@ export function initializeUIManagement() {
     }
 
     // 日志采样率（可通过环境变量配置）
-    const LOG_SAMPLE_RATE = parseFloat(process.env.LOG_SAMPLE_RATE || '1.0');
+    const BASE_LOG_SAMPLE_RATE = parseFloat(process.env.LOG_SAMPLE_RATE || '1.0');
     const BATCH_BROADCAST_DELAY = parseInt(process.env.LOG_BATCH_DELAY || '100'); // 100ms批量广播
+
+    // P3 Fix: High concurrency adaptive log throttling
+    // Track request rate to automatically reduce logging under load
+    let logCountInWindow = 0;
+    let windowStartTime = Date.now();
+    const LOG_WINDOW_MS = 1000; // 1 second window
+    const HIGH_LOAD_THRESHOLD = parseInt(process.env.LOG_HIGH_LOAD_THRESHOLD || '50'); // logs per second threshold
+    const HIGH_LOAD_SAMPLE_RATE = parseFloat(process.env.LOG_HIGH_LOAD_SAMPLE_RATE || '0.1'); // 10% sampling under high load
+
+    /**
+     * P3 Fix: Get adaptive sample rate based on current load
+     */
+    function getAdaptiveSampleRate() {
+        const now = Date.now();
+
+        // Reset window if expired
+        if (now - windowStartTime > LOG_WINDOW_MS) {
+            logCountInWindow = 0;
+            windowStartTime = now;
+        }
+
+        logCountInWindow++;
+
+        // Under high load, reduce sample rate
+        if (logCountInWindow > HIGH_LOAD_THRESHOLD) {
+            return Math.min(BASE_LOG_SAMPLE_RATE, HIGH_LOAD_SAMPLE_RATE);
+        }
+
+        return BASE_LOG_SAMPLE_RATE;
+    }
 
     /**
      * 批量广播日志，减少广播频率
@@ -98,8 +128,9 @@ export function initializeUIManagement() {
     console.log = function(...args) {
         originalLog.apply(console, args);
 
-        // 日志采样：只处理部分日志
-        if (Math.random() > LOG_SAMPLE_RATE) {
+        // P3 Fix: Use adaptive sample rate based on current load
+        const sampleRate = getAdaptiveSampleRate();
+        if (Math.random() > sampleRate) {
             return;
         }
 

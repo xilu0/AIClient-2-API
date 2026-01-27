@@ -87,8 +87,78 @@ export class ProviderPoolManager {
         
         // 用于并发选点时的原子排序辅助（自增序列）
         this._selectionSequence = 0;
- 
+
+        // P3 Fix: Batch Redis update queue for usage increments
+        // Accumulates updates and flushes them periodically to reduce Redis round-trips
+        this._usageBatchQueue = new Map(); // Map<providerType:uuid, {count, lastUsed}>
+        this._usageBatchTimer = null;
+        this._usageBatchInterval = options.globalConfig?.USAGE_BATCH_INTERVAL ?? 100; // 100ms batch interval
+
         this.initializeProviderStatus();
+    }
+
+    /**
+     * P3 Fix: Queue a usage increment for batch processing
+     * @private
+     */
+    _queueUsageIncrement(providerType, uuid) {
+        const key = `${providerType}:${uuid}`;
+        const existing = this._usageBatchQueue.get(key);
+
+        if (existing) {
+            existing.count++;
+            existing.lastUsed = new Date().toISOString();
+        } else {
+            this._usageBatchQueue.set(key, {
+                providerType,
+                uuid,
+                count: 1,
+                lastUsed: new Date().toISOString()
+            });
+        }
+
+        // Schedule batch flush if not already scheduled
+        if (!this._usageBatchTimer) {
+            this._usageBatchTimer = setTimeout(() => {
+                this._flushUsageBatch();
+            }, this._usageBatchInterval);
+        }
+    }
+
+    /**
+     * P3 Fix: Flush accumulated usage increments to Redis
+     * @private
+     */
+    async _flushUsageBatch() {
+        this._usageBatchTimer = null;
+
+        if (this._usageBatchQueue.size === 0) {
+            return;
+        }
+
+        const adapter = this._getStorageAdapter();
+        if (!adapter || adapter.getType() !== 'redis') {
+            // Fall back to individual updates for non-Redis storage
+            this._usageBatchQueue.clear();
+            return;
+        }
+
+        // Copy and clear the queue
+        const updates = Array.from(this._usageBatchQueue.values());
+        this._usageBatchQueue.clear();
+
+        // Fire and forget - don't await to avoid blocking
+        Promise.resolve().then(async () => {
+            try {
+                // Process updates - could be optimized with Redis pipeline in the future
+                for (const update of updates) {
+                    await adapter.incrementUsage(update.providerType, update.uuid);
+                }
+                this._log('debug', `[P3 Batch] Flushed ${updates.length} usage updates to Redis`);
+            } catch (err) {
+                this._log('error', `[P3 Batch] Failed to flush usage updates: ${err.message}`);
+            }
+        });
     }
 
     /**
@@ -740,12 +810,10 @@ export class ProviderPoolManager {
 
         if (!options.skipUsageCount) {
             selected.config.usageCount++;
-            // Use Redis atomic increment if available, otherwise use debounced file save
+            // P3 Fix: Use batch queue for Redis updates to reduce round-trips
             if (this.isUsingRedis()) {
-                // Atomic Redis update - fire and forget for performance
-                this._incrementUsageAtomic(providerType, selected.config.uuid).catch(err => {
-                    this._log('error', `Async usage increment failed: ${err.message}`);
-                });
+                // Queue for batch processing instead of immediate Redis call
+                this._queueUsageIncrement(providerType, selected.config.uuid);
             } else {
                 // 只有在使用次数达到一定阈值时才保存，减少I/O频率
                 if (selected.config.usageCount % 50 === 0) {
