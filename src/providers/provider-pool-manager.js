@@ -657,15 +657,21 @@ export class ProviderPoolManager {
             return null;
         }
 
-        // Use Promise-based mutex instead of busy-wait polling
-        // This avoids blocking the event loop with setImmediate polling
-        return this._selectionMutex.withLock(providerType, () => {
-            return this._doSelectProvider(providerType, requestedModel, options);
-        });
+        // P2 Fix: Remove mutex lock to allow concurrent provider selection
+        // The lock was causing serialization of all requests under high concurrency.
+        //
+        // Why this is safe:
+        // 1. Redis atomic operations (Lua scripts) guarantee data consistency
+        // 2. _lastSelectionSeq ensures different requests get different providers
+        // 3. In-memory cache updates are atomic (single-threaded JS)
+        // 4. Worst case: two requests select same provider, which is acceptable
+        //
+        // Trade-off: Slightly less perfect load balancing for much higher throughput
+        return this._doSelectProvider(providerType, requestedModel, options);
     }
 
     /**
-     * 实际执行 provider 选择的内部方法（同步执行，由锁保护）
+     * 实际执行 provider 选择的内部方法
      * @private
      */
     _doSelectProvider(providerType, requestedModel, options) {
