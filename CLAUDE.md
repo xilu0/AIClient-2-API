@@ -10,6 +10,28 @@ AIClient-2-API is a proxy service that converts client-only LLM APIs (Gemini, Cl
 - **License**: GPL v3
 - **No framework**: Uses raw Node.js HTTP server (no Express)
 
+## ⚠️ 架构原则：纯 Redis 存储（严格执行）
+
+**本服务采用纯 Redis 架构，严禁使用文件配置存储任何运行时数据。**
+
+### 禁止事项
+- ❌ 不得使用 JSON 文件存储 provider pools 或其他运行时配置
+- ❌ 不得将运行时状态写入文件系统
+- ❌ 不得在新功能中引入文件存储依赖
+- ❌ 不得回退到文件存储作为"降级方案"
+
+### 允许的文件
+- ✅ `configs/config.json` — 仅用于启动参数（端口、API Key 等）
+- ✅ `configs/pwd` — 仅用于 Web UI 密码
+
+### 开发要求
+添加新功能需要持久化数据时，必须使用 Redis：
+```javascript
+import { getStorageAdapter } from '../core/storage-factory.js';
+const storage = getStorageAdapter();
+await storage.set('key', value);
+```
+
 ## Commands
 
 ```bash
@@ -206,6 +228,7 @@ These must survive upstream merges in `src/providers/claude/claude-kiro.js`:
 **This is a core billing feature — merges must not break this design.**
 
 ## Changelog
+- 2026-01-26: Added explicit architecture principle section prohibiting file-based configuration
 - 2026-01-26: **BREAKING**: Redis-only architecture for provider pools, removed `provider_pools.json` (fixes high-concurrency CPU bottleneck)
 - 2026-01-25: Added Redis configuration storage with graceful fallback, CLI migration tools, and /api/redis/status endpoint
 - 2026-01-25: Expanded CLAUDE.md with architecture, commands, and development guidance
