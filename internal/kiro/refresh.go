@@ -20,9 +20,18 @@ const (
 	RefreshTimeout = 15 * time.Second
 )
 
-// RefreshRequest represents a token refresh request.
+// RefreshRequest represents a token refresh request for social auth.
 type RefreshRequest struct {
 	RefreshToken string `json:"refreshToken"`
+}
+
+// RefreshIDCRequest represents a token refresh request for IDC (builder-id) auth.
+// IDC auth requires clientId, clientSecret, and grantType in addition to refreshToken.
+type RefreshIDCRequest struct {
+	RefreshToken string `json:"refreshToken"`
+	ClientID     string `json:"clientId"`
+	ClientSecret string `json:"clientSecret"`
+	GrantType    string `json:"grantType"`
 }
 
 // RefreshResponse represents a token refresh response.
@@ -34,26 +43,44 @@ type RefreshResponse struct {
 }
 
 // RefreshToken refreshes an OAuth token using the Kiro refresh endpoint.
-func (c *Client) RefreshToken(ctx context.Context, region string, refreshToken string, authMethod string, idcRegion string) (*RefreshResponse, error) {
+// For IDC auth (builder-id), clientID and clientSecret are required.
+// For social auth, only refreshToken is needed.
+func (c *Client) RefreshToken(ctx context.Context, region string, refreshToken string, authMethod string, idcRegion string, clientID string, clientSecret string) (*RefreshResponse, error) {
 	// Use IDC endpoint for non-social auth, otherwise use Kiro endpoint
 	var refreshURL string
+	var bodyBytes []byte
+	var err error
+
 	if authMethod != "" && authMethod != "social" {
+		// IDC auth (builder-id): requires clientId, clientSecret, and grantType
 		if idcRegion == "" {
 			idcRegion = region
 		}
 		refreshURL = fmt.Sprintf(RefreshIDCURLTemplate, idcRegion)
+
+		reqBody := RefreshIDCRequest{
+			RefreshToken: refreshToken,
+			ClientID:     clientID,
+			ClientSecret: clientSecret,
+			GrantType:    "refresh_token",
+		}
+		bodyBytes, err = json.Marshal(reqBody)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal IDC refresh request: %w", err)
+		}
+		c.logger.Debug("using IDC auth for token refresh", "idcRegion", idcRegion)
 	} else {
+		// Social auth: only refreshToken is needed
 		if region == "" {
 			region = "us-east-1"
 		}
 		refreshURL = fmt.Sprintf(RefreshURLTemplate, region)
-	}
 
-	// Build request body
-	reqBody := RefreshRequest{RefreshToken: refreshToken}
-	bodyBytes, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal refresh request: %w", err)
+		reqBody := RefreshRequest{RefreshToken: refreshToken}
+		bodyBytes, err = json.Marshal(reqBody)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal refresh request: %w", err)
+		}
 	}
 
 	// Create request with timeout

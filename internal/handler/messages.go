@@ -565,7 +565,8 @@ func (h *MessagesHandler) refreshToken(ctx context.Context, acc *redis.Account, 
 	h.logger.Info("refreshing expired token", "uuid", acc.UUID, "region", region)
 
 	// Call Kiro refresh endpoint
-	refreshResp, err := h.kiroClient.RefreshToken(ctx, region, token.RefreshToken, token.AuthMethod, token.IDCRegion)
+	// For IDC auth (builder-id), clientID and clientSecret are required
+	refreshResp, err := h.kiroClient.RefreshToken(ctx, region, token.RefreshToken, token.AuthMethod, token.IDCRegion, token.ClientID, token.ClientSecret)
 	if err != nil {
 		return nil, fmt.Errorf("token refresh failed: %w", err)
 	}
