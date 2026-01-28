@@ -4,13 +4,20 @@ package kiro
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"runtime"
 	"time"
+
+	"github.com/google/uuid"
+)
+
+const (
+	// KiroVersion simulates the Kiro IDE version for user-agent.
+	KiroVersion = "1.0.0"
 )
 
 // Client is an HTTP client for the Kiro API.
@@ -72,15 +79,27 @@ func (c *Client) SendStreamingRequest(ctx context.Context, req *Request) (io.Rea
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Set headers
+	// Set headers to match the JS implementation exactly
+	// Required headers for Kiro API compatibility
+	invocationID := uuid.New().String()
+	osName := runtime.GOOS
+	goVersion := runtime.Version()
+	machineID := generateMachineID(req.ProfileARN)
+
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "application/vnd.amazon.eventstream")
+	httpReq.Header.Set("Accept", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+req.Token)
-	httpReq.Header.Set("x-amz-profile-arn", req.ProfileARN)
+	httpReq.Header.Set("amz-sdk-invocation-id", invocationID)
+	httpReq.Header.Set("amz-sdk-request", "attempt=1; max=1")
+	httpReq.Header.Set("x-amzn-kiro-agent-mode", "vibe")
+	httpReq.Header.Set("x-amz-user-agent", fmt.Sprintf("aws-sdk-js/1.0.0 KiroIDE-%s-%s", KiroVersion, machineID))
+	httpReq.Header.Set("User-Agent", fmt.Sprintf("aws-sdk-js/1.0.0 ua/2.1 os/%s lang/go md/go#%s api/codewhispererruntime#1.0.0 m/E KiroIDE-%s-%s", osName, goVersion, KiroVersion, machineID))
+	httpReq.Header.Set("Connection", "close")
 
 	c.logger.Debug("sending request to Kiro API",
 		"url", url,
 		"profile_arn", req.ProfileARN,
+		"invocation_id", invocationID,
 	)
 
 	// Send request
@@ -106,6 +125,19 @@ func (c *Client) SendStreamingRequest(ctx context.Context, req *Request) (io.Rea
 	}
 
 	return resp.Body, nil
+}
+
+// generateMachineID generates a machine ID from the profile ARN.
+func generateMachineID(profileARN string) string {
+	if profileARN == "" {
+		profileARN = "KIRO_DEFAULT_MACHINE"
+	}
+	// Use first 16 chars of a deterministic hash-like value
+	b := make([]byte, 32)
+	for i := 0; i < len(profileARN) && i < 32; i++ {
+		b[i%32] ^= profileARN[i]
+	}
+	return fmt.Sprintf("%x", b[:16])
 }
 
 // APIError represents an error from the Kiro API.
@@ -141,7 +173,8 @@ func buildKiroURL(region string) string {
 
 // BuildRequestBody builds the request body for the Kiro API.
 // It converts Claude API messages to Kiro's conversationState format.
-func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool, system string) ([]byte, error) {
+// profileARN is included in the request body for social auth method (required by Kiro API).
+func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool, system string, profileARN string) ([]byte, error) {
 	// Parse Claude messages
 	var claudeMessages []struct {
 		Role    string          `json:"role"`
@@ -151,15 +184,45 @@ func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool,
 		return nil, fmt.Errorf("failed to parse messages: %w", err)
 	}
 
+	if len(claudeMessages) == 0 {
+		return nil, fmt.Errorf("no messages found")
+	}
+
 	// Map model name to Kiro model ID
 	kiroModel := mapModelToKiro(model)
 
 	// Build conversation history and current message
 	var history []map[string]interface{}
 	var currentContent string
+	startIndex := 0
+
+	// Handle system prompt - prepend to first user message (matching JS implementation)
+	if system != "" && len(claudeMessages) > 0 {
+		if claudeMessages[0].Role == "user" {
+			// Prepend system prompt to first user message content
+			firstUserContent := extractTextContent(claudeMessages[0].Content)
+			history = append(history, map[string]interface{}{
+				"userInputMessage": map[string]interface{}{
+					"content": system + "\n\n" + firstUserContent,
+					"modelId": kiroModel,
+					"origin":  "AI_EDITOR",
+				},
+			})
+			startIndex = 1 // Start from second message
+		} else {
+			// Add system prompt as standalone user message
+			history = append(history, map[string]interface{}{
+				"userInputMessage": map[string]interface{}{
+					"content": system,
+					"modelId": kiroModel,
+					"origin":  "AI_EDITOR",
+				},
+			})
+		}
+	}
 
 	// Process all messages except the last one as history
-	for i := 0; i < len(claudeMessages)-1; i++ {
+	for i := startIndex; i < len(claudeMessages)-1; i++ {
 		msg := claudeMessages[i]
 		content := extractTextContent(msg.Content)
 
@@ -181,14 +244,47 @@ func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool,
 		}
 	}
 
-	// Last message is the current message
-	if len(claudeMessages) > 0 {
-		lastMsg := claudeMessages[len(claudeMessages)-1]
+	// Handle last message - it becomes currentMessage
+	lastMsg := claudeMessages[len(claudeMessages)-1]
+
+	// If last message is assistant, move it to history and create user currentMessage with "Continue"
+	// Kiro API requires currentMessage to be userInputMessage type
+	if lastMsg.Role == "assistant" {
+		assistantContent := extractTextContent(lastMsg.Content)
+		if assistantContent == "" {
+			assistantContent = "Continue"
+		}
+		history = append(history, map[string]interface{}{
+			"assistantResponseMessage": map[string]interface{}{
+				"content": assistantContent,
+			},
+		})
+		currentContent = "Continue"
+	} else {
+		// Last message is user
 		currentContent = extractTextContent(lastMsg.Content)
+
+		// Kiro API requires history to end with assistantResponseMessage if currentMessage is user
+		if len(history) > 0 {
+			lastHistoryItem := history[len(history)-1]
+			if _, hasUser := lastHistoryItem["userInputMessage"]; hasUser {
+				// History ends with userInputMessage, add empty assistantResponseMessage
+				history = append(history, map[string]interface{}{
+					"assistantResponseMessage": map[string]interface{}{
+						"content": "Continue",
+					},
+				})
+			}
+		}
 	}
 
-	// Build the request
-	conversationID := generateConversationID()
+	// Kiro API requires content to never be empty
+	if currentContent == "" {
+		currentContent = "Continue"
+	}
+
+	// Build the request with proper UUID format (matching JS uuidv4())
+	conversationID := uuid.New().String()
 	request := map[string]interface{}{
 		"conversationState": map[string]interface{}{
 			"chatTriggerType": "MANUAL",
@@ -203,9 +299,15 @@ func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool,
 		},
 	}
 
-	// Add history if not empty
+	// Add history only if not empty (API may not accept empty array)
 	if len(history) > 0 {
 		request["conversationState"].(map[string]interface{})["history"] = history
+	}
+
+	// Add profileArn to request body (required for social auth method)
+	// This is critical - JS implementation includes profileArn in body, not as header
+	if profileARN != "" {
+		request["profileArn"] = profileARN
 	}
 
 	return json.Marshal(request)
@@ -261,12 +363,6 @@ func mapModelToKiro(model string) string {
 	return "CLAUDE_SONNET_4_5_20250929_V1_0"
 }
 
-// generateConversationID generates a unique conversation ID.
-func generateConversationID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
-}
 
 // Close closes the client and releases resources.
 func (c *Client) Close() {
