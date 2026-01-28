@@ -101,6 +101,7 @@ func (c *Client) SendStreamingRequest(ctx context.Context, req *Request) (io.Rea
 		"url", url,
 		"profile_arn", req.ProfileARN,
 		"invocation_id", invocationID,
+		"request_body", string(req.Body),
 	)
 
 	// Send request
@@ -116,7 +117,8 @@ func (c *Client) SendStreamingRequest(ctx context.Context, req *Request) (io.Rea
 
 		c.logger.Warn("Kiro API error",
 			"status", resp.StatusCode,
-			"body", string(body),
+			"response_body", string(body),
+			"request_body", string(req.Body),
 		)
 
 		return nil, &APIError{
@@ -706,7 +708,8 @@ func convertToolsToKiroFormat(toolsJSON []byte) []map[string]interface{} {
 
 		// Build Kiro tool format
 		inputSchema := tool.InputSchema
-		if len(inputSchema) == 0 {
+		// Ensure inputSchema is a valid JSON object (not null, empty, or invalid)
+		if len(inputSchema) == 0 || string(inputSchema) == "null" || string(inputSchema) == "" {
 			inputSchema = []byte("{}")
 		}
 
