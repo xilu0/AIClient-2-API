@@ -25,10 +25,11 @@ func TestConvertMessageStart(t *testing.T) {
 		},
 	}
 
-	event, err := converter.Convert(kiroChunk)
+	events, err := converter.Convert(kiroChunk)
 	require.NoError(t, err)
-	require.NotNil(t, event)
+	require.NotEmpty(t, events)
 
+	event := events[0]
 	assert.Equal(t, "message_start", event.Type)
 
 	// Check it's the correct typed struct
@@ -54,10 +55,11 @@ func TestConvertContentBlockDelta(t *testing.T) {
 		},
 	}
 
-	event, err := converter.Convert(kiroChunk)
+	events, err := converter.Convert(kiroChunk)
 	require.NoError(t, err)
-	require.NotNil(t, event)
+	require.NotEmpty(t, events)
 
+	event := events[0]
 	assert.Equal(t, "content_block_delta", event.Type)
 
 	// Check it's the correct typed struct
@@ -81,10 +83,11 @@ func TestConvertThinkingDelta(t *testing.T) {
 		},
 	}
 
-	event, err := converter.Convert(kiroChunk)
+	events, err := converter.Convert(kiroChunk)
 	require.NoError(t, err)
-	require.NotNil(t, event)
+	require.NotEmpty(t, events)
 
+	event := events[0]
 	assert.Equal(t, "content_block_delta", event.Type)
 
 	// Check it's the correct typed struct
@@ -104,10 +107,11 @@ func TestConvertMessageDelta(t *testing.T) {
 		Usage:      []byte(`{"input_tokens": 100, "output_tokens": 50}`),
 	}
 
-	event, err := converter.Convert(kiroChunk)
+	events, err := converter.Convert(kiroChunk)
 	require.NoError(t, err)
-	require.NotNil(t, event)
+	require.NotEmpty(t, events)
 
+	event := events[0]
 	assert.Equal(t, "message_delta", event.Type)
 
 	// Check it's the correct typed struct (FullMessageDeltaEvent for converter)
@@ -130,10 +134,11 @@ func TestConvertContentBlockStart(t *testing.T) {
 		},
 	}
 
-	event, err := converter.Convert(kiroChunk)
+	events, err := converter.Convert(kiroChunk)
 	require.NoError(t, err)
-	require.NotNil(t, event)
+	require.NotEmpty(t, events)
 
+	event := events[0]
 	assert.Equal(t, "content_block_start", event.Type)
 
 	// Check it's the correct typed struct
@@ -152,10 +157,11 @@ func TestConvertContentBlockStop(t *testing.T) {
 		Index: intPtr(0),
 	}
 
-	event, err := converter.Convert(kiroChunk)
+	events, err := converter.Convert(kiroChunk)
 	require.NoError(t, err)
-	require.NotNil(t, event)
+	require.NotEmpty(t, events)
 
+	event := events[0]
 	assert.Equal(t, "content_block_stop", event.Type)
 
 	// Check it's the correct typed struct
@@ -171,10 +177,11 @@ func TestConvertMessageStop(t *testing.T) {
 		Type: "message_stop",
 	}
 
-	event, err := converter.Convert(kiroChunk)
+	events, err := converter.Convert(kiroChunk)
 	require.NoError(t, err)
-	require.NotNil(t, event)
+	require.NotEmpty(t, events)
 
+	event := events[0]
 	assert.Equal(t, "message_stop", event.Type)
 }
 
@@ -186,11 +193,11 @@ func TestConvertUnknownType(t *testing.T) {
 	}
 
 	// Unknown types should be passed through or ignored
-	event, err := converter.Convert(kiroChunk)
-	// Should not error, but may return nil
+	events, err := converter.Convert(kiroChunk)
+	// Should not error, but may return nil or empty
 	assert.NoError(t, err)
 	// Implementation may choose to skip unknown types
-	_ = event
+	_ = events
 }
 
 func TestConvertToolUse(t *testing.T) {
@@ -207,10 +214,11 @@ func TestConvertToolUse(t *testing.T) {
 		},
 	}
 
-	event, err := converter.Convert(kiroChunk)
+	events, err := converter.Convert(kiroChunk)
 	require.NoError(t, err)
-	require.NotNil(t, event)
+	require.NotEmpty(t, events)
 
+	event := events[0]
 	// Check it's the correct typed struct
 	data, ok := event.Data.(claude.ContentBlockStartEvent)
 	require.True(t, ok, "expected ContentBlockStartEvent, got %T", event.Data)
@@ -308,6 +316,74 @@ func TestGetFinalUsage_EmptyContent(t *testing.T) {
 	assert.Equal(t, 0, usage.CacheCreationInputTokens)
 	assert.Equal(t, 0, usage.CacheReadInputTokens)
 	assert.Equal(t, 0, usage.OutputTokens)
+}
+
+// TestConvertKiroToolUse tests Kiro's native tool use format
+func TestConvertKiroToolUse(t *testing.T) {
+	converter := claude.NewConverter("claude-sonnet-4")
+
+	// First chunk: tool use start
+	kiroChunk := &kiro.KiroChunk{
+		Name:      "get_weather",
+		ToolUseID: "tool_abc123",
+		Input:     `{"location": "San Francisco"}`,
+	}
+
+	events, err := converter.Convert(kiroChunk)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+
+	// Should return message_start + content_block_start
+	assert.GreaterOrEqual(t, len(events), 1)
+
+	// Find content_block_start event
+	var toolUseStart *claude.SSEEvent
+	for _, e := range events {
+		if e.Type == "content_block_start" {
+			toolUseStart = e
+			break
+		}
+	}
+	require.NotNil(t, toolUseStart, "expected content_block_start event")
+
+	data, ok := toolUseStart.Data.(claude.ContentBlockStartEvent)
+	require.True(t, ok, "expected ContentBlockStartEvent, got %T", toolUseStart.Data)
+
+	assert.Equal(t, "tool_use", data.ContentBlock.Type)
+	assert.Equal(t, "tool_abc123", data.ContentBlock.ID)
+	assert.Equal(t, "get_weather", data.ContentBlock.Name)
+}
+
+// TestConvertToolUseWithInvalidJSON tests handling of invalid JSON input
+func TestConvertToolUseWithInvalidJSON(t *testing.T) {
+	// This tests the aggregator's JSON validation
+	aggregator := claude.NewAggregator("claude-sonnet-4")
+
+	// Add tool use with invalid JSON
+	chunk := &kiro.KiroChunk{
+		Name:      "test_tool",
+		ToolUseID: "tool_123",
+		Input:     `{invalid json`,
+		Stop:      true,
+	}
+
+	err := aggregator.Add(chunk)
+	require.NoError(t, err)
+
+	// Build response
+	resp := aggregator.Build()
+	require.NotNil(t, resp)
+	require.Len(t, resp.Content, 1)
+
+	// Input should be wrapped in raw_arguments
+	block := resp.Content[0]
+	assert.Equal(t, "tool_use", block.Type)
+	assert.Equal(t, "tool_123", block.ID)
+	assert.Equal(t, "test_tool", block.Name)
+
+	// Input should be valid JSON now (wrapped)
+	assert.NotNil(t, block.Input)
+	assert.Contains(t, string(block.Input), "raw_arguments")
 }
 
 func intPtr(i int) *int {

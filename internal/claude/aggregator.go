@@ -24,12 +24,12 @@ type Aggregator struct {
 	outputText             string // Accumulated output for token counting
 
 	// Current content block being built
-	currentBlockIndex int
-	currentBlockType  string
-	currentBlockText  string
-	currentBlockID    string
-	currentBlockName  string
-	currentBlockInput json.RawMessage
+	currentBlockIndex    int
+	currentBlockType     string
+	currentBlockText     string
+	currentBlockID       string
+	currentBlockName     string
+	currentBlockInputStr string // Accumulate input as string first, validate JSON later
 }
 
 // NewAggregator creates a new response aggregator.
@@ -98,15 +98,9 @@ func (a *Aggregator) Add(chunk *kiro.KiroChunk) error {
 		a.currentBlockID = chunk.ToolUseID
 		a.currentBlockName = chunk.Name
 
-		// Accumulate input (Kiro sends input as string chunks)
+		// Accumulate input as string (Kiro sends input as string chunks)
 		if chunk.Input != "" {
-			// Parse input as JSON
-			if a.currentBlockInput == nil {
-				a.currentBlockInput = json.RawMessage(chunk.Input)
-			} else {
-				// Append to existing input (handle chunked input)
-				a.currentBlockInput = append(a.currentBlockInput, []byte(chunk.Input)...)
-			}
+			a.currentBlockInputStr += chunk.Input
 			a.outputText += chunk.Input // Track for token counting
 		}
 
@@ -120,11 +114,7 @@ func (a *Aggregator) Add(chunk *kiro.KiroChunk) error {
 
 	// Handle tool input continuation (input without name/toolUseId)
 	if chunk.Input != "" && chunk.Name == "" && a.currentBlockType == "tool_use" {
-		if a.currentBlockInput == nil {
-			a.currentBlockInput = json.RawMessage(chunk.Input)
-		} else {
-			a.currentBlockInput = append(a.currentBlockInput, []byte(chunk.Input)...)
-		}
+		a.currentBlockInputStr += chunk.Input
 		a.outputText += chunk.Input
 
 		// If stop is true, finish this tool block
@@ -154,7 +144,9 @@ func (a *Aggregator) Add(chunk *kiro.KiroChunk) error {
 			a.currentBlockText = chunk.ContentBlock.Text
 			a.currentBlockID = chunk.ContentBlock.ID
 			a.currentBlockName = chunk.ContentBlock.Name
-			a.currentBlockInput = chunk.ContentBlock.Input
+			if chunk.ContentBlock.Input != nil {
+				a.currentBlockInputStr = string(chunk.ContentBlock.Input)
+			}
 		}
 
 	case "content_block_delta", kiro.EventTypeContentBlockDelta:
@@ -217,9 +209,8 @@ func (a *Aggregator) finishCurrentBlock() {
 	case "tool_use":
 		block.ID = a.currentBlockID
 		block.Name = a.currentBlockName
-		if a.currentBlockInput != nil {
-			block.Input = a.currentBlockInput
-		}
+		// Validate and set input JSON
+		block.Input = a.validateAndGetInput()
 	case "thinking":
 		block.Thinking = a.currentBlockText
 	}
@@ -236,7 +227,33 @@ func (a *Aggregator) finishCurrentBlock() {
 	a.currentBlockText = ""
 	a.currentBlockID = ""
 	a.currentBlockName = ""
-	a.currentBlockInput = nil
+	a.currentBlockInputStr = ""
+}
+
+// validateAndGetInput validates the accumulated input string as JSON.
+// If invalid, wraps it in {"raw_arguments": "..."} as a fallback.
+// Returns empty object {} if input is empty.
+func (a *Aggregator) validateAndGetInput() json.RawMessage {
+	if a.currentBlockInputStr == "" {
+		// Return empty object for empty input
+		return json.RawMessage("{}")
+	}
+
+	// Try to validate as JSON
+	var js json.RawMessage
+	if err := json.Unmarshal([]byte(a.currentBlockInputStr), &js); err == nil {
+		// Valid JSON, use as-is
+		return js
+	}
+
+	// Invalid JSON - wrap in raw_arguments as fallback (matching JS implementation)
+	wrapped := map[string]string{"raw_arguments": a.currentBlockInputStr}
+	result, err := json.Marshal(wrapped)
+	if err != nil {
+		// Should never happen, but return empty object as ultimate fallback
+		return json.RawMessage("{}")
+	}
+	return result
 }
 
 // Build creates the final MessageResponse.

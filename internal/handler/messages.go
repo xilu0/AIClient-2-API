@@ -307,28 +307,24 @@ func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, ss
 				continue
 			}
 
-			// Convert to Claude format
-			event, err := converter.Convert(&chunk)
+			// Convert to Claude format (returns multiple events)
+			events, err := converter.Convert(&chunk)
 			if err != nil {
 				h.logger.Warn("failed to convert chunk", "error", err)
 				continue
 			}
 
-			if event != nil {
-				// Track if we started a content block (from Kiro's simple content format)
-				if event.Type == "message_start" {
-					// After message_start, we need to send content_block_start
-					if err := sseWriter.WriteEvent(event.Type, event.Data); err != nil {
-						h.logger.Error("failed to write SSE event", "error", err)
-						return
-					}
-					// Send content_block_start
-					if err := sseWriter.WriteContentBlockStart(contentBlockIndex, "text"); err != nil {
-						h.logger.Error("failed to write content_block_start", "error", err)
-						return
-					}
-					contentBlockStarted = true
+			// Write all events returned by the converter
+			for _, event := range events {
+				if event == nil {
 					continue
+				}
+
+				// Track content block state
+				if event.Type == "content_block_start" {
+					contentBlockStarted = true
+				} else if event.Type == "content_block_stop" {
+					contentBlockIndex++
 				}
 
 				if err := sseWriter.WriteEvent(event.Type, event.Data); err != nil {

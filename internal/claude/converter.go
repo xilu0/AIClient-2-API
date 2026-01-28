@@ -10,15 +10,15 @@ import (
 
 // Converter converts Kiro API responses to Claude API format.
 type Converter struct {
-	model          string
-	messageID      string
-	contentStarted bool
-	contentIndex   int
+	model            string
+	messageID        string
+	messageStartSent bool // Track if message_start has been sent
+	contentStarted   bool
+	contentIndex     int
 
 	// Tool use tracking
 	inToolUse        bool
 	toolUseStartSent bool
-	pendingInput     string // Cached input from first tool use chunk
 
 	// Token tracking
 	estimatedInputTokens   int
@@ -49,9 +49,10 @@ func (c *Converter) GetMessageID() string {
 	return c.messageID
 }
 
-// Convert converts a Kiro chunk to a Claude SSE event.
+// Convert converts a Kiro chunk to Claude SSE events.
 // Kiro returns simple {content: "..."} chunks, which we convert to Claude format.
-func (c *Converter) Convert(chunk *kiro.KiroChunk) (*SSEEvent, error) {
+// Returns a slice of events since some conversions require multiple events (e.g., message_start + content_block_start).
+func (c *Converter) Convert(chunk *kiro.KiroChunk) ([]*SSEEvent, error) {
 	if chunk == nil {
 		return nil, nil
 	}
@@ -109,12 +110,27 @@ func (c *Converter) Convert(chunk *kiro.KiroChunk) (*SSEEvent, error) {
 }
 
 // convertKiroContent converts Kiro's simple content format to Claude SSE events.
-func (c *Converter) convertKiroContent(chunk *kiro.KiroChunk) (*SSEEvent, error) {
+func (c *Converter) convertKiroContent(chunk *kiro.KiroChunk) ([]*SSEEvent, error) {
+	var events []*SSEEvent
+
 	// If this is the first content, we need to send message_start and content_block_start first
 	if !c.contentStarted {
 		c.contentStarted = true
-		// Return message_start first - the handler will call Convert again for the content
-		return c.createMessageStart(), nil
+		c.messageStartSent = true
+
+		// Send message_start
+		events = append(events, c.createMessageStart())
+
+		// Send content_block_start for text
+		contentBlockStart := ContentBlockStartEvent{
+			Type:  "content_block_start",
+			Index: c.contentIndex,
+			ContentBlock: ContentStart{
+				Type: "text",
+				Text: "",
+			},
+		}
+		events = append(events, &SSEEvent{Type: "content_block_start", Data: contentBlockStart})
 	}
 
 	// Send content_block_delta with the text (using typed struct for efficiency)
@@ -126,8 +142,9 @@ func (c *Converter) convertKiroContent(chunk *kiro.KiroChunk) (*SSEEvent, error)
 			Text: chunk.Content,
 		},
 	}
+	events = append(events, &SSEEvent{Type: "content_block_delta", Data: event})
 
-	return &SSEEvent{Type: "content_block_delta", Data: event}, nil
+	return events, nil
 }
 
 // createMessageStart creates a message_start event.
@@ -157,21 +174,24 @@ func (c *Converter) createMessageStart() *SSEEvent {
 // convertToolUse converts Kiro tool use events to Claude format.
 // Kiro sends tool use as chunks: {name, toolUseId, input, stop}
 // We convert to: content_block_start + content_block_delta (input_json_delta) + content_block_stop
-func (c *Converter) convertToolUse(chunk *kiro.KiroChunk) (*SSEEvent, error) {
+func (c *Converter) convertToolUse(chunk *kiro.KiroChunk) ([]*SSEEvent, error) {
+	var events []*SSEEvent
+
 	// First event with name + toolUseId starts a new tool use block
 	if chunk.Name != "" && chunk.ToolUseID != "" && !c.toolUseStartSent {
+		// If message_start hasn't been sent yet, send it first
+		if !c.messageStartSent {
+			c.messageStartSent = true
+			events = append(events, c.createMessageStart())
+		}
+
 		// Increment content index for the new tool_use block
 		c.contentIndex++
 		c.inToolUse = true
 		c.toolUseStartSent = true
 
-		// Cache the input from first chunk (if present) to send in next call
-		if chunk.Input != "" {
-			c.pendingInput = chunk.Input
-		}
-
 		// Send content_block_start
-		event := ContentBlockStartEvent{
+		contentBlockStart := ContentBlockStartEvent{
 			Type:  "content_block_start",
 			Index: c.contentIndex,
 			ContentBlock: ContentStart{
@@ -181,28 +201,23 @@ func (c *Converter) convertToolUse(chunk *kiro.KiroChunk) (*SSEEvent, error) {
 				Input: json.RawMessage("{}"), // Start with empty object
 			},
 		}
+		events = append(events, &SSEEvent{Type: "content_block_start", Data: contentBlockStart})
 
-		return &SSEEvent{Type: "content_block_start", Data: event}, nil
-	}
-
-	// Send pending input from first chunk (if any)
-	if c.inToolUse && c.pendingInput != "" {
-		input := c.pendingInput
-		c.pendingInput = "" // Clear pending input
-
-		// Track input for token counting
-		c.outputBuilder.WriteString(input)
-
-		event := ContentBlockDeltaEvent{
-			Type:  "content_block_delta",
-			Index: c.contentIndex,
-			Delta: DeltaBlock{
-				Type:        "input_json_delta",
-				PartialJSON: input,
-			},
+		// If the start chunk also contains input, send it immediately as a delta
+		if chunk.Input != "" {
+			c.outputBuilder.WriteString(chunk.Input)
+			inputDelta := ContentBlockDeltaEvent{
+				Type:  "content_block_delta",
+				Index: c.contentIndex,
+				Delta: DeltaBlock{
+					Type:        "input_json_delta",
+					PartialJSON: chunk.Input,
+				},
+			}
+			events = append(events, &SSEEvent{Type: "content_block_delta", Data: inputDelta})
 		}
 
-		return &SSEEvent{Type: "content_block_delta", Data: event}, nil
+		return events, nil
 	}
 
 	// Send input as delta if present
@@ -219,27 +234,28 @@ func (c *Converter) convertToolUse(chunk *kiro.KiroChunk) (*SSEEvent, error) {
 			},
 		}
 
-		return &SSEEvent{Type: "content_block_delta", Data: event}, nil
+		return []*SSEEvent{{Type: "content_block_delta", Data: event}}, nil
 	}
 
 	// Send stop event when tool use is complete
 	if c.inToolUse && chunk.Stop {
 		c.inToolUse = false
 		c.toolUseStartSent = false
-		c.pendingInput = "" // Clear any pending input
 
 		event := ContentBlockStopEvent{
 			Type:  "content_block_stop",
 			Index: c.contentIndex,
 		}
 
-		return &SSEEvent{Type: "content_block_stop", Data: event}, nil
+		return []*SSEEvent{{Type: "content_block_stop", Data: event}}, nil
 	}
 
 	return nil, nil
 }
 
-func (c *Converter) convertMessageStart(chunk *kiro.KiroChunk) (*SSEEvent, error) {
+func (c *Converter) convertMessageStart(chunk *kiro.KiroChunk) ([]*SSEEvent, error) {
+	c.messageStartSent = true
+
 	var usage SSEUsage
 	if chunk.Message != nil && chunk.Message.Usage != nil {
 		// Apply 1:2:25 token distribution
@@ -263,10 +279,10 @@ func (c *Converter) convertMessageStart(chunk *kiro.KiroChunk) (*SSEEvent, error
 		},
 	}
 
-	return &SSEEvent{Type: "message_start", Data: event}, nil
+	return []*SSEEvent{{Type: "message_start", Data: event}}, nil
 }
 
-func (c *Converter) convertContentBlockStart(chunk *kiro.KiroChunk) (*SSEEvent, error) {
+func (c *Converter) convertContentBlockStart(chunk *kiro.KiroChunk) ([]*SSEEvent, error) {
 	index := 0
 	if chunk.Index != nil {
 		index = *chunk.Index
@@ -287,6 +303,9 @@ func (c *Converter) convertContentBlockStart(chunk *kiro.KiroChunk) (*SSEEvent, 
 			contentStart.Name = chunk.ContentBlock.Name
 			if chunk.ContentBlock.Input != nil {
 				contentStart.Input = chunk.ContentBlock.Input
+			} else {
+				// Ensure input is never nil for tool_use
+				contentStart.Input = json.RawMessage("{}")
 			}
 		case "thinking":
 			contentStart.Thinking = ""
@@ -299,10 +318,10 @@ func (c *Converter) convertContentBlockStart(chunk *kiro.KiroChunk) (*SSEEvent, 
 		ContentBlock: contentStart,
 	}
 
-	return &SSEEvent{Type: "content_block_start", Data: event}, nil
+	return []*SSEEvent{{Type: "content_block_start", Data: event}}, nil
 }
 
-func (c *Converter) convertContentBlockDelta(chunk *kiro.KiroChunk) (*SSEEvent, error) {
+func (c *Converter) convertContentBlockDelta(chunk *kiro.KiroChunk) ([]*SSEEvent, error) {
 	index := 0
 	if chunk.Index != nil {
 		index = *chunk.Index
@@ -324,10 +343,10 @@ func (c *Converter) convertContentBlockDelta(chunk *kiro.KiroChunk) (*SSEEvent, 
 		Delta: delta,
 	}
 
-	return &SSEEvent{Type: "content_block_delta", Data: event}, nil
+	return []*SSEEvent{{Type: "content_block_delta", Data: event}}, nil
 }
 
-func (c *Converter) convertContentBlockStop(chunk *kiro.KiroChunk) (*SSEEvent, error) {
+func (c *Converter) convertContentBlockStop(chunk *kiro.KiroChunk) ([]*SSEEvent, error) {
 	index := 0
 	if chunk.Index != nil {
 		index = *chunk.Index
@@ -338,10 +357,10 @@ func (c *Converter) convertContentBlockStop(chunk *kiro.KiroChunk) (*SSEEvent, e
 		Index: index,
 	}
 
-	return &SSEEvent{Type: "content_block_stop", Data: event}, nil
+	return []*SSEEvent{{Type: "content_block_stop", Data: event}}, nil
 }
 
-func (c *Converter) convertMessageDelta(chunk *kiro.KiroChunk) (*SSEEvent, error) {
+func (c *Converter) convertMessageDelta(chunk *kiro.KiroChunk) ([]*SSEEvent, error) {
 	var delta MessageDeltaData
 	if chunk.StopReason != "" {
 		delta.StopReason = chunk.StopReason
@@ -399,15 +418,15 @@ func (c *Converter) convertMessageDelta(chunk *kiro.KiroChunk) (*SSEEvent, error
 		},
 	}
 
-	return &SSEEvent{Type: "message_delta", Data: event}, nil
+	return []*SSEEvent{{Type: "message_delta", Data: event}}, nil
 }
 
-func (c *Converter) convertMessageStop(chunk *kiro.KiroChunk) (*SSEEvent, error) {
+func (c *Converter) convertMessageStop(chunk *kiro.KiroChunk) ([]*SSEEvent, error) {
 	event := MessageStopEvent{
 		Type: "message_stop",
 	}
 
-	return &SSEEvent{Type: "message_stop", Data: event}, nil
+	return []*SSEEvent{{Type: "message_stop", Data: event}}, nil
 }
 
 // ConvertUsage converts Kiro usage to Claude usage with token distribution.
