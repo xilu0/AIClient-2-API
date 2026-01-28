@@ -19,3 +19,15 @@ babel.config.js
 tests/
 run-tests.js
 test-summary.js
+
+# Go build artifacts (source dirs needed for Dockerfile-go)
+bin/
+*.exe
+*.test
+*.out
+vendor/
+coverage.out
+# Go test directories
+tests/unit/
+tests/integration/
+tests/benchmark/

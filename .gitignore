@@ -16,3 +16,12 @@ api-potluck-data.json
 # Codex credentials
 configs/codex/
 
+# Go (at repo root)
+bin/
+*.exe
+*.test
+*.out
+vendor/
+coverage.out
+kiro-server
+

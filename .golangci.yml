@@ -1,0 +1,50 @@
+# T004: golangci-lint configuration (v2)
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - unconvert
+    - bodyclose
+    - gosec
+  exclusions:
+    paths:
+      - ".*_test\\.go$"
+      - "tests/.*"
+    rules:
+      - linters:
+          - errcheck
+          - gosec
+        path: ".*_test\\.go$"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/anthropics/AIClient-2-API
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+  govet:
+    enable-all: true
+  gosec:
+    excludes:
+      - G104  # Audit errors not checked (handled by errcheck)
+
+issues:
+  max-issues-per-linter: 50
+  max-same-issues: 10

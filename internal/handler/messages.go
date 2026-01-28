@@ -1,0 +1,602 @@
+// Package handler provides HTTP handlers for the Kiro server.
+package handler
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"time"
+
+	"github.com/anthropics/AIClient-2-API/internal/account"
+	"github.com/anthropics/AIClient-2-API/internal/claude"
+	"github.com/anthropics/AIClient-2-API/internal/kiro"
+	"github.com/anthropics/AIClient-2-API/internal/redis"
+)
+
+// MessagesHandler handles POST /v1/messages requests.
+type MessagesHandler struct {
+	selector     *account.Selector
+	poolManager  *redis.PoolManager
+	tokenManager *redis.TokenManager
+	kiroClient   *kiro.Client
+	logger       *slog.Logger
+	maxRetries   int
+}
+
+// MessagesHandlerOptions configures the messages handler.
+type MessagesHandlerOptions struct {
+	Selector     *account.Selector
+	PoolManager  *redis.PoolManager
+	TokenManager *redis.TokenManager
+	KiroClient   *kiro.Client
+	Logger       *slog.Logger
+	MaxRetries   int
+}
+
+// NewMessagesHandler creates a new messages handler.
+func NewMessagesHandler(opts MessagesHandlerOptions) *MessagesHandler {
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	maxRetries := opts.MaxRetries
+	if maxRetries == 0 {
+		maxRetries = 3
+	}
+
+	return &MessagesHandler{
+		selector:     opts.Selector,
+		poolManager:  opts.PoolManager,
+		tokenManager: opts.TokenManager,
+		kiroClient:   opts.KiroClient,
+		logger:       logger,
+		maxRetries:   maxRetries,
+	}
+}
+
+// ServeHTTP handles the messages request.
+func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Parse request body
+	var req claude.MessageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.writeError(w, claude.NewInvalidRequestError("Invalid JSON: "+err.Error()))
+		return
+	}
+
+	// Log received model for debugging
+	h.logger.Debug("received request", "model", req.Model)
+
+	// Validate request
+	if err := h.validateRequest(&req); err != nil {
+		h.writeError(w, err)
+		return
+	}
+
+	// Handle streaming vs non-streaming
+	if req.Stream {
+		h.handleStreaming(ctx, w, &req)
+	} else {
+		h.handleNonStreaming(ctx, w, &req)
+	}
+}
+
+// validateRequest validates the message request.
+func (h *MessagesHandler) validateRequest(req *claude.MessageRequest) *claude.APIError {
+	// Required fields
+	if req.Model == "" {
+		return claude.NewInvalidRequestError("model: field is required")
+	}
+	if len(req.Messages) == 0 {
+		return claude.NewInvalidRequestError("messages: field is required and must contain at least one message")
+	}
+	if req.MaxTokens <= 0 {
+		return claude.NewInvalidRequestError("max_tokens: must be a positive integer greater than 0")
+	}
+
+	// Validate max_tokens range
+	if req.MaxTokens > 200000 {
+		return claude.NewInvalidRequestError("max_tokens: exceeds maximum allowed value of 200000")
+	}
+
+	// Validate messages
+	for i, msg := range req.Messages {
+		if msg.Role == "" {
+			return claude.NewInvalidRequestError(fmt.Sprintf("messages[%d].role: field is required", i))
+		}
+		if msg.Role != "user" && msg.Role != "assistant" {
+			return claude.NewInvalidRequestError(fmt.Sprintf("messages[%d].role: must be 'user' or 'assistant', got '%s'", i, msg.Role))
+		}
+		if msg.Content == nil {
+			return claude.NewInvalidRequestError(fmt.Sprintf("messages[%d].content: field is required", i))
+		}
+	}
+
+	// Validate conversation starts with user
+	if len(req.Messages) > 0 && req.Messages[0].Role != "user" {
+		return claude.NewInvalidRequestError("messages: first message must have role 'user'")
+	}
+
+	// Validate temperature range if provided
+	if req.Temperature != nil {
+		if *req.Temperature < 0.0 || *req.Temperature > 1.0 {
+			return claude.NewInvalidRequestError("temperature: must be between 0.0 and 1.0")
+		}
+	}
+
+	// Validate top_p range if provided
+	if req.TopP != nil {
+		if *req.TopP < 0.0 || *req.TopP > 1.0 {
+			return claude.NewInvalidRequestError("top_p: must be between 0.0 and 1.0")
+		}
+	}
+
+	// Validate top_k if provided
+	if req.TopK != nil && *req.TopK < 0 {
+		return claude.NewInvalidRequestError("top_k: must be a non-negative integer")
+	}
+
+	return nil
+}
+
+// handleStreaming handles streaming requests.
+func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWriter, req *claude.MessageRequest) {
+	// Estimate input tokens before making the request
+	estimatedInputTokens := claude.EstimateInputTokens(req)
+
+	// Setup SSE writer
+	sseWriter := claude.NewSSEWriter(w)
+	sseWriter.WriteHeaders()
+
+	// Try to get a working account with retries
+	excluded := make(map[string]bool)
+	var lastErr error
+
+	for attempt := 0; attempt < h.maxRetries; attempt++ {
+		// Select account
+		acc, err := h.selector.SelectWithRetry(ctx, h.maxRetries-attempt, excluded)
+		if err != nil {
+			if errors.Is(err, account.ErrNoHealthyAccounts) {
+				_ = sseWriter.WriteError(claude.ErrNoHealthyAccounts)
+				return
+			}
+			lastErr = err
+			continue
+		}
+
+		// Get token
+		token, err := h.tokenManager.GetToken(ctx, acc.UUID)
+		if err != nil {
+			h.logger.Warn("failed to get token", "uuid", acc.UUID, "error", err)
+			excluded[acc.UUID] = true
+			lastErr = err
+			continue
+		}
+
+		// Check if token is expired and try to refresh
+		if h.tokenManager.IsExpired(token) {
+			h.logger.Warn("token expired, attempting refresh", "uuid", acc.UUID)
+			newToken, refreshErr := h.refreshToken(ctx, acc, token)
+			if refreshErr != nil {
+				h.logger.Error("token refresh failed", "uuid", acc.UUID, "error", refreshErr)
+				excluded[acc.UUID] = true
+				lastErr = refreshErr
+				continue
+			}
+			token = newToken
+		}
+
+		// Build request body
+		messagesJSON, _ := json.Marshal(req.Messages)
+		reqBody, err := kiro.BuildRequestBody(req.Model, messagesJSON, req.MaxTokens, true, req.GetSystemString())
+		if err != nil {
+			h.writeError(w, claude.NewAPIError("Failed to build request"))
+			return
+		}
+
+		// Get region from token (idcRegion), default to us-east-1
+		region := token.IDCRegion
+		if region == "" {
+			region = "us-east-1"
+		}
+
+		// Send to Kiro
+		kiroReq := &kiro.Request{
+			Region:     region,
+			ProfileARN: acc.ProfileARN,
+			Token:      token.AccessToken,
+			Body:       reqBody,
+		}
+
+		body, err := h.kiroClient.SendStreamingRequest(ctx, kiroReq)
+		if err != nil {
+			var apiErr *kiro.APIError
+			if errors.As(err, &apiErr) {
+				if apiErr.IsRateLimited() || apiErr.IsForbidden() {
+					// Mark account unhealthy and retry
+					_ = h.poolManager.MarkUnhealthy(ctx, acc.UUID)
+					excluded[acc.UUID] = true
+					lastErr = err
+					continue
+				}
+			}
+			h.logger.Error("Kiro API error", "error", err)
+			_ = sseWriter.WriteError(claude.NewAPIError("Upstream error"))
+			return
+		}
+
+		// Increment usage
+		_ = h.poolManager.IncrementUsage(ctx, acc.UUID)
+
+		// Stream the response with estimated tokens
+		h.streamResponse(ctx, body, sseWriter, req.Model, estimatedInputTokens)
+		if err := body.Close(); err != nil {
+			h.logger.Warn("failed to close response body", "error", err)
+		}
+		return
+	}
+
+	// All retries failed
+	h.logger.Error("all retries failed", "error", lastErr)
+	_ = sseWriter.WriteError(claude.NewAPIError("All accounts failed"))
+}
+
+// streamResponse reads from Kiro and writes SSE events.
+func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, sseWriter *claude.SSEWriter, model string, estimatedInputTokens int) {
+	// Use pooled parser to reduce GC pressure under high concurrency
+	parser := kiro.GetEventStreamParser()
+	defer kiro.ReleaseEventStreamParser(parser)
+
+	converter := claude.NewConverterWithEstimate(model, estimatedInputTokens)
+
+	buf := make([]byte, 4096)
+	contentBlockStarted := false
+	contentBlockIndex := 0
+
+	// Read and process chunks
+	for {
+		select {
+		case <-ctx.Done():
+			// Send final events on context cancellation
+			h.sendFinalStreamEvents(sseWriter, converter, contentBlockStarted, contentBlockIndex)
+			return
+		default:
+		}
+
+		n, err := body.Read(buf)
+		if err != nil {
+			if err == io.EOF {
+				// End of stream - send final events
+				h.sendFinalStreamEvents(sseWriter, converter, contentBlockStarted, contentBlockIndex)
+			} else {
+				h.logger.Error("error reading response", "error", err)
+			}
+			return
+		}
+
+		if n == 0 {
+			continue
+		}
+
+		// Parse AWS event stream messages
+		messages, parseErr := parser.Parse(buf[:n])
+		if parseErr != nil {
+			h.logger.Error("error parsing event stream", "error", parseErr)
+			continue
+		}
+
+		for _, msg := range messages {
+			if !msg.IsEvent() {
+				if msg.IsException() {
+					h.logger.Error("received exception", "payload", string(msg.Payload))
+				}
+				continue
+			}
+
+			// Parse Kiro chunk
+			var chunk kiro.KiroChunk
+			if err := json.Unmarshal(msg.Payload, &chunk); err != nil {
+				h.logger.Warn("failed to parse chunk", "error", err)
+				continue
+			}
+
+			// Convert to Claude format
+			event, err := converter.Convert(&chunk)
+			if err != nil {
+				h.logger.Warn("failed to convert chunk", "error", err)
+				continue
+			}
+
+			if event != nil {
+				// Track if we started a content block (from Kiro's simple content format)
+				if event.Type == "message_start" {
+					// After message_start, we need to send content_block_start
+					if err := sseWriter.WriteEvent(event.Type, event.Data); err != nil {
+						h.logger.Error("failed to write SSE event", "error", err)
+						return
+					}
+					// Send content_block_start
+					if err := sseWriter.WriteContentBlockStart(contentBlockIndex, "text"); err != nil {
+						h.logger.Error("failed to write content_block_start", "error", err)
+						return
+					}
+					contentBlockStarted = true
+					continue
+				}
+
+				if err := sseWriter.WriteEvent(event.Type, event.Data); err != nil {
+					h.logger.Error("failed to write SSE event", "error", err)
+					return
+				}
+			}
+		}
+	}
+}
+
+// sendFinalStreamEvents sends the final SSE events at the end of a stream.
+func (h *MessagesHandler) sendFinalStreamEvents(sseWriter *claude.SSEWriter, converter *claude.Converter, contentBlockStarted bool, contentBlockIndex int) {
+	// Get final usage from converter
+	finalUsage := converter.GetFinalUsage()
+
+	// Send content_block_stop if we started a content block
+	if contentBlockStarted {
+		if err := sseWriter.WriteContentBlockStop(contentBlockIndex); err != nil {
+			h.logger.Error("failed to write content_block_stop", "error", err)
+		}
+	}
+
+	// Send message_delta with final usage (using typed struct for efficiency)
+	// Note: SSEUsage has different json tags than Usage, so explicit copy is intentional
+	messageDeltaEvent := claude.FullMessageDeltaEvent{
+		Type: "message_delta",
+		Delta: claude.MessageDeltaData{
+			StopReason: "end_turn",
+		},
+		Usage: claude.SSEUsage(finalUsage),
+	}
+	if err := sseWriter.WriteEvent("message_delta", messageDeltaEvent); err != nil {
+		h.logger.Error("failed to write message_delta", "error", err)
+	}
+
+	// Send message_stop
+	if err := sseWriter.WriteMessageStop(); err != nil {
+		h.logger.Error("failed to write message_stop", "error", err)
+	}
+}
+
+// handleNonStreaming handles non-streaming requests.
+func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.ResponseWriter, req *claude.MessageRequest) {
+	// Estimate input tokens before making the request
+	estimatedInputTokens := claude.EstimateInputTokens(req)
+
+	// Try to get a working account with retries
+	excluded := make(map[string]bool)
+	var lastErr error
+
+	for attempt := 0; attempt < h.maxRetries; attempt++ {
+		// Select account
+		acc, err := h.selector.SelectWithRetry(ctx, h.maxRetries-attempt, excluded)
+		if err != nil {
+			if errors.Is(err, account.ErrNoHealthyAccounts) {
+				h.writeError(w, claude.ErrNoHealthyAccounts)
+				return
+			}
+			lastErr = err
+			continue
+		}
+
+		// Get token
+		token, err := h.tokenManager.GetToken(ctx, acc.UUID)
+		if err != nil {
+			h.logger.Warn("failed to get token", "uuid", acc.UUID, "error", err)
+			excluded[acc.UUID] = true
+			lastErr = err
+			continue
+		}
+
+		// Check if token is expired and try to refresh
+		if h.tokenManager.IsExpired(token) {
+			h.logger.Warn("token expired, attempting refresh", "uuid", acc.UUID)
+			newToken, refreshErr := h.refreshToken(ctx, acc, token)
+			if refreshErr != nil {
+				h.logger.Error("token refresh failed", "uuid", acc.UUID, "error", refreshErr)
+				excluded[acc.UUID] = true
+				lastErr = refreshErr
+				continue
+			}
+			token = newToken
+		}
+
+		// Build request body - use stream=true internally to receive chunks
+		messagesJSON, _ := json.Marshal(req.Messages)
+		reqBody, err := kiro.BuildRequestBody(req.Model, messagesJSON, req.MaxTokens, true, req.GetSystemString())
+		if err != nil {
+			h.writeError(w, claude.NewAPIError("Failed to build request"))
+			return
+		}
+
+		// Get region from token (idcRegion), default to us-east-1
+		region := token.IDCRegion
+		if region == "" {
+			region = "us-east-1"
+		}
+
+		// Send to Kiro
+		kiroReq := &kiro.Request{
+			Region:     region,
+			ProfileARN: acc.ProfileARN,
+			Token:      token.AccessToken,
+			Body:       reqBody,
+		}
+
+		body, err := h.kiroClient.SendStreamingRequest(ctx, kiroReq)
+		if err != nil {
+			var apiErr *kiro.APIError
+			if errors.As(err, &apiErr) {
+				if apiErr.IsRateLimited() || apiErr.IsForbidden() {
+					// Mark account unhealthy and retry
+					_ = h.poolManager.MarkUnhealthy(ctx, acc.UUID)
+					excluded[acc.UUID] = true
+					lastErr = err
+					continue
+				}
+			}
+			h.logger.Error("Kiro API error", "error", err)
+			h.writeError(w, claude.NewAPIError("Upstream error"))
+			return
+		}
+
+		// Increment usage
+		_ = h.poolManager.IncrementUsage(ctx, acc.UUID)
+
+		// Aggregate the response with estimated tokens
+		response := h.aggregateResponse(ctx, body, req.Model, estimatedInputTokens)
+		if err := body.Close(); err != nil {
+			h.logger.Warn("failed to close response body", "error", err)
+		}
+
+		if response == nil {
+			h.writeError(w, claude.NewAPIError("Failed to aggregate response"))
+			return
+		}
+
+		// Write JSON response with proper Content-Type
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			h.logger.Error("failed to write response", "error", err)
+		}
+		return
+	}
+
+	// All retries failed
+	h.logger.Error("all retries failed", "error", lastErr)
+	h.writeError(w, claude.NewAPIError("All accounts failed"))
+}
+
+// aggregateResponse reads all chunks and builds a complete response.
+func (h *MessagesHandler) aggregateResponse(ctx context.Context, body io.Reader, model string, estimatedInputTokens int) *claude.MessageResponse {
+	// Use pooled parser to reduce GC pressure under high concurrency
+	parser := kiro.GetEventStreamParser()
+	defer kiro.ReleaseEventStreamParser(parser)
+
+	aggregator := claude.NewAggregatorWithEstimate(model, estimatedInputTokens)
+
+	buf := make([]byte, 4096)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return aggregator.Build()
+		default:
+		}
+
+		n, err := body.Read(buf)
+		if err != nil {
+			if err == io.EOF {
+				// End of stream, return aggregated response
+				return aggregator.Build()
+			}
+			h.logger.Error("error reading response", "error", err)
+			return aggregator.Build()
+		}
+
+		if n == 0 {
+			continue
+		}
+
+		// Parse AWS event stream messages
+		messages, err := parser.Parse(buf[:n])
+		if err != nil {
+			h.logger.Error("error parsing event stream", "error", err)
+			continue
+		}
+
+		for _, msg := range messages {
+			if !msg.IsEvent() {
+				if msg.IsException() {
+					h.logger.Error("received exception", "payload", string(msg.Payload))
+				}
+				continue
+			}
+
+			// Parse Kiro chunk
+			var chunk kiro.KiroChunk
+			if err := json.Unmarshal(msg.Payload, &chunk); err != nil {
+				h.logger.Warn("failed to parse chunk", "error", err)
+				continue
+			}
+
+			// Add to aggregator
+			if err := aggregator.Add(&chunk); err != nil {
+				h.logger.Warn("failed to aggregate chunk", "error", err)
+			}
+		}
+	}
+}
+
+// writeError writes an error response.
+func (h *MessagesHandler) writeError(w http.ResponseWriter, err *claude.APIError) {
+	err.WriteError(w)
+}
+
+// refreshToken attempts to refresh an expired token.
+func (h *MessagesHandler) refreshToken(ctx context.Context, acc *redis.Account, token *redis.Token) (*redis.Token, error) {
+	if token.RefreshToken == "" {
+		return nil, fmt.Errorf("no refresh token available")
+	}
+
+	// Get region for refresh endpoint
+	region := token.IDCRegion
+	if region == "" {
+		region = acc.Region
+	}
+	if region == "" {
+		region = "us-east-1"
+	}
+
+	h.logger.Info("refreshing expired token", "uuid", acc.UUID, "region", region)
+
+	// Call Kiro refresh endpoint
+	refreshResp, err := h.kiroClient.RefreshToken(ctx, region, token.RefreshToken, token.AuthMethod, token.IDCRegion)
+	if err != nil {
+		return nil, fmt.Errorf("token refresh failed: %w", err)
+	}
+
+	// Calculate new expiry time
+	expiresAt := time.Now().Add(time.Duration(refreshResp.ExpiresIn) * time.Second).UTC().Format(time.RFC3339)
+
+	// Build updated token
+	newToken := &redis.Token{
+		AccessToken:   refreshResp.AccessToken,
+		RefreshToken:  refreshResp.RefreshToken,
+		ExpiresAt:     expiresAt,
+		AuthMethod:    token.AuthMethod,
+		TokenType:     token.TokenType,
+		ClientID:      token.ClientID,
+		ClientSecret:  token.ClientSecret,
+		IDCRegion:     token.IDCRegion,
+		LastRefreshed: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	// Update ProfileARN if returned
+	if refreshResp.ProfileARN != "" {
+		// Update account's ProfileARN in pool
+		acc.ProfileARN = refreshResp.ProfileARN
+	}
+
+	// Save to Redis
+	if err := h.tokenManager.SetToken(ctx, acc.UUID, newToken); err != nil {
+		h.logger.Warn("failed to save refreshed token", "uuid", acc.UUID, "error", err)
+		// Continue anyway, token is valid
+	}
+
+	h.logger.Info("token refreshed successfully", "uuid", acc.UUID, "expires_at", expiresAt)
+	return newToken, nil
+}
