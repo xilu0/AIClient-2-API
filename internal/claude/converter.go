@@ -15,6 +15,11 @@ type Converter struct {
 	contentStarted bool
 	contentIndex   int
 
+	// Tool use tracking
+	inToolUse        bool
+	toolUseStartSent bool
+	pendingInput     string // Cached input from first tool use chunk
+
 	// Token tracking
 	estimatedInputTokens   int
 	contextUsagePercentage float64
@@ -63,8 +68,13 @@ func (c *Converter) Convert(chunk *kiro.KiroChunk) (*SSEEvent, error) {
 		return c.convertKiroContent(chunk)
 	}
 
-	// Handle tool use events
+	// Handle tool use events (initial event with name/toolUseId OR continuation with input/stop)
 	if chunk.Name != "" && chunk.ToolUseID != "" {
+		// First event with name and ID
+		return c.convertToolUse(chunk)
+	}
+	if c.inToolUse && (chunk.Input != "" || chunk.Stop) {
+		// Continuation or stop event for ongoing tool use
 		return c.convertToolUse(chunk)
 	}
 
@@ -145,8 +155,87 @@ func (c *Converter) createMessageStart() *SSEEvent {
 }
 
 // convertToolUse converts Kiro tool use events to Claude format.
+// Kiro sends tool use as chunks: {name, toolUseId, input, stop}
+// We convert to: content_block_start + content_block_delta (input_json_delta) + content_block_stop
 func (c *Converter) convertToolUse(chunk *kiro.KiroChunk) (*SSEEvent, error) {
-	// Tool use handling - simplified for now
+	// First event with name + toolUseId starts a new tool use block
+	if chunk.Name != "" && chunk.ToolUseID != "" && !c.toolUseStartSent {
+		// Increment content index for the new tool_use block
+		c.contentIndex++
+		c.inToolUse = true
+		c.toolUseStartSent = true
+
+		// Cache the input from first chunk (if present) to send in next call
+		if chunk.Input != "" {
+			c.pendingInput = chunk.Input
+		}
+
+		// Send content_block_start
+		event := ContentBlockStartEvent{
+			Type:  "content_block_start",
+			Index: c.contentIndex,
+			ContentBlock: ContentStart{
+				Type:  "tool_use",
+				ID:    chunk.ToolUseID,
+				Name:  chunk.Name,
+				Input: json.RawMessage("{}"), // Start with empty object
+			},
+		}
+
+		return &SSEEvent{Type: "content_block_start", Data: event}, nil
+	}
+
+	// Send pending input from first chunk (if any)
+	if c.inToolUse && c.pendingInput != "" {
+		input := c.pendingInput
+		c.pendingInput = "" // Clear pending input
+
+		// Track input for token counting
+		c.outputBuilder.WriteString(input)
+
+		event := ContentBlockDeltaEvent{
+			Type:  "content_block_delta",
+			Index: c.contentIndex,
+			Delta: DeltaBlock{
+				Type:        "input_json_delta",
+				PartialJSON: input,
+			},
+		}
+
+		return &SSEEvent{Type: "content_block_delta", Data: event}, nil
+	}
+
+	// Send input as delta if present
+	if c.inToolUse && chunk.Input != "" {
+		// Track input for token counting
+		c.outputBuilder.WriteString(chunk.Input)
+
+		event := ContentBlockDeltaEvent{
+			Type:  "content_block_delta",
+			Index: c.contentIndex,
+			Delta: DeltaBlock{
+				Type:        "input_json_delta",
+				PartialJSON: chunk.Input,
+			},
+		}
+
+		return &SSEEvent{Type: "content_block_delta", Data: event}, nil
+	}
+
+	// Send stop event when tool use is complete
+	if c.inToolUse && chunk.Stop {
+		c.inToolUse = false
+		c.toolUseStartSent = false
+		c.pendingInput = "" // Clear any pending input
+
+		event := ContentBlockStopEvent{
+			Type:  "content_block_stop",
+			Index: c.contentIndex,
+		}
+
+		return &SSEEvent{Type: "content_block_stop", Data: event}, nil
+	}
+
 	return nil, nil
 }
 

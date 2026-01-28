@@ -68,13 +68,70 @@ func (a *Aggregator) Add(chunk *kiro.KiroChunk) error {
 
 	// Handle Kiro's simple content format
 	if chunk.Content != "" && chunk.FollowupPrompt == nil {
-		// Start a text block if not already started
+		// If current block is not text, finish it and start a new text block
+		if a.currentBlockType != "" && a.currentBlockType != "text" {
+			a.finishCurrentBlock()
+			// After finish, currentBlockIndex is reset to -1
+			// Start new text block at next index
+			a.currentBlockIndex = len(a.content)
+			a.currentBlockType = "text"
+			a.currentBlockText = ""
+		}
+		// If no block started yet, start a text block
 		if a.currentBlockIndex < 0 {
-			a.currentBlockIndex = 0
+			a.currentBlockIndex = len(a.content)
 			a.currentBlockType = "text"
 		}
 		a.currentBlockText += chunk.Content
 		a.outputText += chunk.Content // Track for token counting
+		return nil
+	}
+
+	// Handle Kiro's native tool use events (name + toolUseId format)
+	if chunk.Name != "" && chunk.ToolUseID != "" {
+		// Finish any previous block
+		a.finishCurrentBlock()
+
+		// Start new tool_use block at next index
+		a.currentBlockIndex = len(a.content)
+		a.currentBlockType = "tool_use"
+		a.currentBlockID = chunk.ToolUseID
+		a.currentBlockName = chunk.Name
+
+		// Accumulate input (Kiro sends input as string chunks)
+		if chunk.Input != "" {
+			// Parse input as JSON
+			if a.currentBlockInput == nil {
+				a.currentBlockInput = json.RawMessage(chunk.Input)
+			} else {
+				// Append to existing input (handle chunked input)
+				a.currentBlockInput = append(a.currentBlockInput, []byte(chunk.Input)...)
+			}
+			a.outputText += chunk.Input // Track for token counting
+		}
+
+		// If stop is true, finish this tool block
+		if chunk.Stop {
+			a.finishCurrentBlock()
+		}
+
+		return nil
+	}
+
+	// Handle tool input continuation (input without name/toolUseId)
+	if chunk.Input != "" && chunk.Name == "" && a.currentBlockType == "tool_use" {
+		if a.currentBlockInput == nil {
+			a.currentBlockInput = json.RawMessage(chunk.Input)
+		} else {
+			a.currentBlockInput = append(a.currentBlockInput, []byte(chunk.Input)...)
+		}
+		a.outputText += chunk.Input
+
+		// If stop is true, finish this tool block
+		if chunk.Stop {
+			a.finishCurrentBlock()
+		}
+
 		return nil
 	}
 

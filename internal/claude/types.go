@@ -233,8 +233,9 @@ type ContentBlockDeltaEvent struct {
 
 // DeltaBlock is the delta object in content_block_delta events.
 type DeltaBlock struct {
-	Type string `json:"type"` // "text_delta", "thinking_delta"
-	Text string `json:"text"`
+	Type        string `json:"type"`                   // "text_delta", "thinking_delta", "input_json_delta"
+	Text        string `json:"text,omitempty"`         // For text_delta and thinking_delta
+	PartialJSON string `json:"partial_json,omitempty"` // For input_json_delta (tool inputs)
 }
 
 // ContentBlockStopEvent represents a content_block_stop SSE event.
