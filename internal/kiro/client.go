@@ -536,12 +536,14 @@ func parseAssistantContent(content json.RawMessage) ParsedAssistantContent {
 			if len(block.Input) > 0 {
 				_ = json.Unmarshal(block.Input, &input)
 			}
+			// Kiro API requires input field to always be present
+			if input == nil {
+				input = map[string]interface{}{}
+			}
 			toolUse := map[string]interface{}{
 				"toolUseId": block.ID,
 				"name":      block.Name,
-			}
-			if input != nil {
-				toolUse["input"] = input
+				"input":     input,
 			}
 			result.ToolUses = append(result.ToolUses, toolUse)
 		}
