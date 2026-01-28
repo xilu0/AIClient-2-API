@@ -192,9 +192,10 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 			token = newToken
 		}
 
-		// Build request body - include profileARN for social auth method
+		// Build request body - include profileARN for social auth method and tools
 		messagesJSON, _ := json.Marshal(req.Messages)
-		reqBody, err := kiro.BuildRequestBody(req.Model, messagesJSON, req.MaxTokens, true, req.GetSystemString(), acc.ProfileARN)
+		toolsJSON, _ := json.Marshal(req.Tools)
+		reqBody, err := kiro.BuildRequestBody(req.Model, messagesJSON, req.MaxTokens, true, req.GetSystemString(), acc.ProfileARN, toolsJSON)
 		if err != nil {
 			h.writeError(w, claude.NewAPIError("Failed to build request"))
 			return
@@ -414,9 +415,10 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 		}
 
 		// Build request body - use stream=true internally to receive chunks
-		// Include profileARN for social auth method
+		// Include profileARN for social auth method and tools
 		messagesJSON, _ := json.Marshal(req.Messages)
-		reqBody, err := kiro.BuildRequestBody(req.Model, messagesJSON, req.MaxTokens, true, req.GetSystemString(), acc.ProfileARN)
+		toolsJSON, _ := json.Marshal(req.Tools)
+		reqBody, err := kiro.BuildRequestBody(req.Model, messagesJSON, req.MaxTokens, true, req.GetSystemString(), acc.ProfileARN, toolsJSON)
 		if err != nil {
 			h.writeError(w, claude.NewAPIError("Failed to build request"))
 			return
