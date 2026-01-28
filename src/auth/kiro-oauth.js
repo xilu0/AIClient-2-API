@@ -121,7 +121,11 @@ async function saveKiroTokenToRedis(tokenData, options = {}) {
             addedAt: new Date().toISOString()
         };
 
-        await storage.addProvider(providerType, provider);
+        const addResult = await storage.addProvider(providerType, provider);
+        if (!addResult.success) {
+            console.error(`${KIRO_OAUTH_CONFIG.logPrefix} Failed to add provider to Redis: ${addResult.error}`);
+            return { success: false, error: addResult.error || 'Failed to add provider to Redis' };
+        }
         console.log(`${KIRO_OAUTH_CONFIG.logPrefix} Token saved to Redis, UUID: ${uuid}`);
 
         // 更新 providerPoolManager 的内存状态
