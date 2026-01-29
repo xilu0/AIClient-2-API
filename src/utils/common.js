@@ -73,6 +73,12 @@ export const MODEL_PROVIDER = {
     FORWARD_API: 'forward-api',
 }
 
+// P0-1: Cache MODEL_PROVIDER values as Set for O(1) lookup
+export const MODEL_PROVIDER_SET = new Set(Object.values(MODEL_PROVIDER));
+
+// P0-2: Map cache for getProtocolPrefix to avoid redundant string operations
+const protocolPrefixCache = new Map();
+
 /**
  * Extracts the protocol prefix from a given model provider string.
  * This is used to determine if two providers belong to the same underlying protocol (e.g., gemini, openai, claude).
@@ -80,16 +86,24 @@ export const MODEL_PROVIDER = {
  * @returns {string} The protocol prefix (e.g., 'gemini', 'openai', 'claude').
  */
 export function getProtocolPrefix(provider) {
-    // Special case for Codex - it needs its own protocol
-    if (provider === 'openai-codex-oauth') {
-        return 'codex';
+    // Check cache first
+    if (protocolPrefixCache.has(provider)) {
+        return protocolPrefixCache.get(provider);
     }
 
-    const hyphenIndex = provider.indexOf('-');
-    if (hyphenIndex !== -1) {
-        return provider.substring(0, hyphenIndex);
+    // Compute prefix
+    let prefix;
+    // Special case for Codex - it needs its own protocol
+    if (provider === 'openai-codex-oauth') {
+        prefix = 'codex';
+    } else {
+        const hyphenIndex = provider.indexOf('-');
+        prefix = hyphenIndex !== -1 ? provider.substring(0, hyphenIndex) : provider;
     }
-    return provider; // Return original if no hyphen is found
+
+    // Cache and return
+    protocolPrefixCache.set(provider, prefix);
+    return prefix;
 }
 
 export const ENDPOINT_TYPE = {

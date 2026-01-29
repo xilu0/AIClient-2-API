@@ -6,6 +6,9 @@ import {
 } from '../utils/common.js';
 import { getProviderPoolManager } from './service-manager.js';
 
+// P0-5: Compile regex once at module level to avoid repeated compilation
+const GEMINI_URL_PATTERN = new RegExp(`/v1beta/models/(.+?):(${API_ACTIONS.GENERATE_CONTENT}|${API_ACTIONS.STREAM_GENERATE_CONTENT})`);
+
 /**
  * Handle API authentication and routing
  * @param {string} method - The HTTP method
@@ -43,8 +46,7 @@ export async function handleAPIRequests(method, path, req, res, currentConfig, a
             await handleContentGenerationRequest(req, res, apiService, ENDPOINT_TYPE.OPENAI_RESPONSES, currentConfig, promptLogFilename, providerPoolManager, currentConfig.uuid, path);
             return true;
         }
-        const geminiUrlPattern = new RegExp(`/v1beta/models/(.+?):(${API_ACTIONS.GENERATE_CONTENT}|${API_ACTIONS.STREAM_GENERATE_CONTENT})`);
-        if (geminiUrlPattern.test(path)) {
+        if (GEMINI_URL_PATTERN.test(path)) { // P0-5: Use pre-compiled regex
             await handleContentGenerationRequest(req, res, apiService, ENDPOINT_TYPE.GEMINI_CONTENT, currentConfig, promptLogFilename, providerPoolManager, currentConfig.uuid, path);
             return true;
         }

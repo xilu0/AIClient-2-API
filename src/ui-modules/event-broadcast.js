@@ -3,6 +3,38 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import multer from 'multer';
 
+// P0-6: Global heartbeat timer for all SSE connections (避免每个连接独立定时器)
+let globalHeartbeatTimer = null;
+const sseConnections = new Set();
+
+/**
+ * P0-6: Start global heartbeat timer if not already running
+ */
+function startGlobalHeartbeat() {
+    if (!globalHeartbeatTimer) {
+        globalHeartbeatTimer = setInterval(() => {
+            for (const res of sseConnections) {
+                try {
+                    res.write(':\n\n');
+                } catch (err) {
+                    // Connection broken, remove it
+                    sseConnections.delete(res);
+                }
+            }
+        }, 30000);
+    }
+}
+
+/**
+ * P0-6: Stop global heartbeat timer if no connections remain
+ */
+function stopGlobalHeartbeat() {
+    if (sseConnections.size === 0 && globalHeartbeatTimer) {
+        clearInterval(globalHeartbeatTimer);
+        globalHeartbeatTimer = null;
+    }
+}
+
 /**
  * Helper function to broadcast events to UI clients
  * @param {string} eventType - The type of event
@@ -20,6 +52,7 @@ export function broadcastEvent(eventType, data) {
 
 /**
  * Server-Sent Events for real-time updates
+ * P0-6: Use global heartbeat timer instead of per-connection timer
  */
 export async function handleEvents(req, res) {
     res.writeHead(200, {
@@ -37,13 +70,14 @@ export async function handleEvents(req, res) {
     }
     global.eventClients.push(res);
 
-    // Keep connection alive
-    const keepAlive = setInterval(() => {
-        res.write(':\n\n');
-    }, 30000);
+    // P0-6: Add to global SSE connections set
+    sseConnections.add(res);
+    startGlobalHeartbeat();
 
     req.on('close', () => {
-        clearInterval(keepAlive);
+        // P0-6: Remove from global set and stop timer if needed
+        sseConnections.delete(res);
+        stopGlobalHeartbeat();
         global.eventClients = global.eventClients.filter(r => r !== res);
     });
 

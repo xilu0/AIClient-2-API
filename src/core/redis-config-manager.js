@@ -584,11 +584,15 @@ class RedisConfigManager extends StorageAdapter {
 
         try {
             executeResult = await this._execute(async (client) => {
-                await client.hset(
+                const multi = client.multi();
+                multi.hset(
                     this._key(`pools:${providerType}`),
                     provider.uuid,
                     JSON.stringify(provider)
                 );
+                // P1 Fix: Add to pool-types set to ensure discovery
+                multi.sadd(this._key('pool-types'), providerType);
+                await multi.exec();
             }, `addProvider:${providerType}:${provider.uuid}`);
             redisSuccess = !executeResult.queued;
         } catch (err) {

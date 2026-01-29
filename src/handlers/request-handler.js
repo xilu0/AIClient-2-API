@@ -4,20 +4,22 @@ import { handleUIApiRequests, serveStaticFiles } from '../services/ui-manager.js
 import { handleAPIRequests } from '../services/api-manager.js';
 import { getApiService, getProviderStatus } from '../services/service-manager.js';
 import { getProviderPoolManager } from '../services/service-manager.js';
-import { MODEL_PROVIDER } from '../utils/common.js';
+import { MODEL_PROVIDER, MODEL_PROVIDER_SET } from '../utils/common.js';
 import { PROMPT_LOG_FILENAME } from '../core/config-manager.js';
 import { handleOllamaRequest, handleOllamaShow } from './ollama-handler.js';
 import { getPluginManager } from '../core/plugin-manager.js';
 
 /**
  * Parse request body as JSON
+ * P0-3: Use Buffer.concat instead of string concatenation to avoid O(n²) complexity
  */
 function parseRequestBody(req) {
     return new Promise((resolve, reject) => {
-        let body = '';
-        req.on('data', chunk => { body += chunk.toString(); });
+        const chunks = [];
+        req.on('data', chunk => { chunks.push(chunk); });
         req.on('end', () => {
             try {
+                const body = Buffer.concat(chunks).toString();
                 resolve(body ? JSON.parse(body) : {});
             } catch (e) {
                 reject(new Error('Invalid JSON in request body'));
@@ -140,7 +142,7 @@ export function createRequestHandler(config, providerPoolManager) {
         
         if (pathSegments.length > 0 && !isOllamaPath) {
             const firstSegment = pathSegments[0];
-            const isValidProvider = Object.values(MODEL_PROVIDER).includes(firstSegment);
+            const isValidProvider = MODEL_PROVIDER_SET.has(firstSegment); // P0-1: O(1) lookup
             if (firstSegment && isValidProvider) {
                 currentConfig.MODEL_PROVIDER = firstSegment;
                 console.log(`[Config] MODEL_PROVIDER overridden by path segment to: ${currentConfig.MODEL_PROVIDER}`);

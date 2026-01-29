@@ -14,6 +14,17 @@ export const DEFAULT_MAX_TOKENS = 8192;
 export const DEFAULT_TEMPERATURE = 1;
 export const DEFAULT_TOP_P = 0.95;
 
+// P0-4: Gemini支持的 JSON Schema 属性白名单 (使用 Set 实现 O(1) 查找)
+const ALLOWED_SCHEMA_KEYS = new Set([
+    "type",
+    "description",
+    "properties",
+    "required",
+    "enum",
+    "items",
+    "nullable"
+]);
+
 // =============================================================================
 // OpenAI 相关常量
 // =============================================================================
@@ -248,20 +259,9 @@ export function cleanJsonSchemaProperties(schema) {
         return schema.map(item => cleanJsonSchemaProperties(item));
     }
 
-    // Gemini 支持的 JSON Schema 属性白名单
-    const allowedKeys = [
-        "type",
-        "description",
-        "properties",
-        "required",
-        "enum",
-        "items",
-        "nullable"
-    ];
-
     const sanitized = {};
     for (const [key, value] of Object.entries(schema)) {
-        if (allowedKeys.includes(key)) {
+        if (ALLOWED_SCHEMA_KEYS.has(key)) { // P0-4: O(1) lookup
             // 对于需要递归处理的属性
             if (key === 'properties' && typeof value === 'object' && value !== null) {
                 const cleanProperties = {};

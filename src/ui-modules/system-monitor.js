@@ -8,6 +8,13 @@ let previousCpuInfo = null;
 // 进程 CPU 使用率计算相关变量 (PID -> info)
 const processCpuInfoMap = new Map();
 
+// P0-7: Cache for process CPU usage to avoid frequent external process calls
+const processCpuCache = {
+    value: null,
+    timestamp: 0,
+    ttl: 1000  // 1 second cache
+};
+
 /**
  * 获取系统 CPU 使用率百分比
  * @returns {string} CPU 使用率字符串，如 "25.5%"
@@ -48,11 +55,18 @@ export function getSystemCpuUsagePercent() {
 
 /**
  * 获取特定进程的 CPU 使用率百分比
+ * P0-7: Add 1-second cache to avoid frequent external process calls (ps/powershell)
  * @param {number} pid - 进程 ID
  * @returns {string} CPU 使用率字符串，如 "5.2%"
  */
 export function getProcessCpuUsagePercent(pid) {
     if (!pid) return '0.0%';
+
+    // P0-7: Check cache first
+    const now = Date.now();
+    if (processCpuCache.value !== null && (now - processCpuCache.timestamp) < processCpuCache.ttl) {
+        return processCpuCache.value;
+    }
 
     try {
         const isWindows = process.platform === 'win32';
@@ -136,10 +150,22 @@ export function getProcessCpuUsagePercent(pid) {
             }
         }
 
-        return `${Math.max(0, cpuPercent).toFixed(1)}%`;
+        const result = `${Math.max(0, cpuPercent).toFixed(1)}%`;
+
+        // P0-7: Update cache
+        processCpuCache.value = result;
+        processCpuCache.timestamp = Date.now();
+
+        return result;
     } catch (error) {
         // 忽略进程不存在等错误
-        return '0.0%';
+        const fallback = '0.0%';
+
+        // P0-7: Cache error result too to avoid repeated failures
+        processCpuCache.value = fallback;
+        processCpuCache.timestamp = Date.now();
+
+        return fallback;
     }
 }
 

@@ -87,12 +87,27 @@ export class ProviderPoolManager {
         
         // 用于并发选点时的原子排序辅助（自增序列）
         this._selectionSequence = 0;
+        // P5 Fix (方案A): 基于时间戳的序列号基准，避免进程重启后序列号倒退
+        this._sequenceBase = Date.now() * 1000;
 
         // P3 Fix: Batch Redis update queue for usage increments
         // Accumulates updates and flushes them periodically to reduce Redis round-trips
         this._usageBatchQueue = new Map(); // Map<providerType:uuid, {count, lastUsed}>
         this._usageBatchTimer = null;
-        this._usageBatchInterval = options.globalConfig?.USAGE_BATCH_INTERVAL ?? 100; // 100ms batch interval
+        // P5 Fix (方案C): 自适应批处理延迟配置
+        this._usageBatchIntervalMin = options.globalConfig?.USAGE_BATCH_INTERVAL_MIN ?? 10;
+        this._usageBatchIntervalMax = options.globalConfig?.USAGE_BATCH_INTERVAL_MAX ?? 100;
+        this._usageBatchInterval = options.globalConfig?.USAGE_BATCH_INTERVAL ?? 50; // 初始值改为50ms
+
+        // P4 Fix: Throttle recovery check to reduce CPU overhead
+        // Only check scheduled recoveries once per second instead of every request
+        this._lastRecoveryCheckTime = 0;
+        this._recoveryCheckThrottleMs = options.globalConfig?.RECOVERY_CHECK_THROTTLE_MS ?? 1000;
+
+        // P5 Fix (方案B): 防止100ms内重复选择同一节点
+        this._recentSelections = new Map(); // Map<providerType:uuid, timestamp>
+        this._recentSelectionWindow = options.globalConfig?.RECENT_SELECTION_WINDOW ?? 100;
+        this._recentSelectionCleanupCounter = 0;
 
         this.initializeProviderStatus();
     }
@@ -132,7 +147,10 @@ export class ProviderPoolManager {
     async _flushUsageBatch() {
         this._usageBatchTimer = null;
 
-        if (this._usageBatchQueue.size === 0) {
+        // P5 Fix (方案C): 记录当前队列大小用于自适应调整
+        const currentQueueSize = this._usageBatchQueue.size;
+
+        if (currentQueueSize === 0) {
             return;
         }
 
@@ -159,6 +177,30 @@ export class ProviderPoolManager {
                 this._log('error', `[P3 Batch] Failed to flush usage updates: ${err.message}`);
             }
         });
+
+        // P5 Fix (方案C): 自适应调整下次批处理间隔
+        if (currentQueueSize > 50) {
+            // 高并发：队列积压多，缩短间隔加快处理
+            this._usageBatchInterval = Math.max(
+                this._usageBatchIntervalMin,
+                this._usageBatchInterval - 10
+            );
+            this._log('debug', `[P5 Adaptive] Batch interval decreased to ${this._usageBatchInterval}ms (queue: ${currentQueueSize})`);
+        } else if (currentQueueSize < 10 && this._usageBatchInterval < this._usageBatchIntervalMax) {
+            // 低并发：队列较空，延长间隔减少CPU开销
+            this._usageBatchInterval = Math.min(
+                this._usageBatchIntervalMax,
+                this._usageBatchInterval + 10
+            );
+            this._log('debug', `[P5 Adaptive] Batch interval increased to ${this._usageBatchInterval}ms (queue: ${currentQueueSize})`);
+        }
+
+        // 重新调度下次刷新（使用新的间隔）
+        if (this._usageBatchQueue.size > 0 || currentQueueSize > 0) {
+            this._usageBatchTimer = setTimeout(() => {
+                this._flushUsageBatch();
+            }, this._usageBatchInterval);
+        }
     }
 
     /**
@@ -488,41 +530,67 @@ export class ProviderPoolManager {
     }
 
     /**
+     * 解析时间戳，支持数字（毫秒）或 ISO 字符串格式
+     * 使用内存缓存避免重复解析
+     * @private
+     */
+    _parseTimestamp(value, cacheKey, config) {
+        if (!value) return 0;
+        // 如果是数字，直接返回
+        if (typeof value === 'number') return value;
+        // 检查缓存
+        const cacheField = `_${cacheKey}Ts`;
+        if (config[cacheField] !== undefined && config[`_${cacheKey}Src`] === value) {
+            return config[cacheField];
+        }
+        // 解析并缓存
+        const ts = new Date(value).getTime();
+        config[cacheField] = ts;
+        config[`_${cacheKey}Src`] = value;
+        return ts;
+    }
+
+    /**
      * 计算节点的权重/评分，用于排序
      * 分数越低，优先级越高
      * @private
      */
     _calculateNodeScore(providerStatus, now = Date.now()) {
         const config = providerStatus.config;
-        
+
         // 1. 基础健康分：不健康的排最后
         if (!config.isHealthy || config.isDisabled) return 1e18;
-        
-        // 2. 预热/刷新分：2分钟内刷新过且使用次数极少的节点视为“新鲜”，分数极低（最高优）
-        const isFresh = config.lastHealthCheckTime &&
-                        (now - new Date(config.lastHealthCheckTime).getTime() < 120000) &&
+
+        // 2. 预热/刷新分：2分钟内刷新过且使用次数极少的节点视为"新鲜"，分数极低（最高优）
+        // 使用缓存的时间戳解析，避免重复创建 Date 对象
+        const lastHealthCheckTs = this._parseTimestamp(config.lastHealthCheckTime, 'lastHealthCheck', config);
+        const isFresh = lastHealthCheckTs &&
+                        (now - lastHealthCheckTs < 120000) &&
                         (config.usageCount === 0);
         if (isFresh) return -2e18; // 极其优先
- 
+
         // 3. 权重计算逻辑：
         // 改进点：使用 lastUsedTime + usageCount 惩罚 + selectionSequence 惩罚
         // selectionSequence 用于在同一毫秒内彻底打破平局
-        
-        const lastUsedTime = config.lastUsed ? new Date(config.lastUsed).getTime() : (now - 86400000); // 没用过的视为 24 小时前用过（更旧）
+
+        // 使用缓存的时间戳解析
+        const lastUsedTime = config.lastUsed
+            ? this._parseTimestamp(config.lastUsed, 'lastUsed', config)
+            : (now - 86400000); // 没用过的视为 24 小时前用过（更旧）
         const usageCount = config.usageCount || 0;
         const lastSelectionSeq = config._lastSelectionSeq || 0;
-        
+
         // 核心目标：选分最小的。
         // - lastUsedTime 越久，分越小。
         // - usageCount 越多，分越大。
         // - lastSelectionSeq 越大（最近选过），分越大。
-        
+
         // usageCount * 10000: 每多用一次，权重增加 10 秒
         // lastSelectionSeq * 1000: 即使毫秒时间相同，序列号也会让分数产生差异（增加 1 秒权重）
         // 这样可以确保在毫秒级并发下，刚被选中的节点会立刻排到队列末尾
         const baseScore = lastUsedTime + (usageCount * 10000);
         const sequenceScore = lastSelectionSeq * 1000;
-        
+
         return baseScore + sequenceScore;
     }
 
@@ -535,13 +603,19 @@ export class ProviderPoolManager {
 
     /**
      * 日志输出方法，支持日志级别控制
+     * P4 优化：支持延迟求值，message 可以是字符串或返回字符串的函数
+     * 使用函数时，只有在日志级别匹配时才会执行，避免不必要的 JSON.stringify 等开销
+     * @param {string} level - 日志级别
+     * @param {string|function} message - 日志消息或返回消息的函数
      * @private
      */
     _log(level, message) {
         const levels = { debug: 0, info: 1, warn: 2, error: 3 };
         if (levels[level] >= levels[this.logLevel]) {
             const logMethod = level === 'debug' ? 'log' : level;
-            console[logMethod](`[ProviderPoolManager] ${message}`);
+            // P4 优化：支持延迟求值
+            const msg = typeof message === 'function' ? message() : message;
+            console[logMethod](`[ProviderPoolManager] ${msg}`);
         }
     }
 
@@ -746,16 +820,26 @@ export class ProviderPoolManager {
      */
     _doSelectProvider(providerType, requestedModel, options) {
         const availableProviders = this.providerStatus[providerType] || [];
-        
-        // 检查并恢复已到恢复时间的提供商
+
+        // 检查并恢复已到恢复时间的提供商（节流执行）
         this._checkAndRecoverScheduledProviders(providerType);
-        
+
         // 获取固定时间戳，确保排序过程中一致
         const now = Date.now();
-        
-        let availableAndHealthyProviders = availableProviders.filter(p =>
+
+        // 健康 provider 过滤函数
+        const filterHealthy = (providers) => providers.filter(p =>
             p.config.isHealthy && !p.config.isDisabled && !p.config.needsRefresh
         );
+
+        let availableAndHealthyProviders = filterHealthy(availableProviders);
+
+        // P4 安全检查：如果没有健康 provider，强制执行恢复检查后重试
+        // 这确保节流不会导致请求在有可恢复 provider 时失败
+        if (availableAndHealthyProviders.length === 0) {
+            this._checkAndRecoverScheduledProviders(providerType, true); // 强制执行
+            availableAndHealthyProviders = filterHealthy(availableProviders);
+        }
 
         // 如果指定了模型，则排除不支持该模型的提供商
         if (requestedModel) {
@@ -782,30 +866,90 @@ export class ProviderPoolManager {
             return null;
         }
 
-        // 改进：使用统一的评分策略进行选择
-        // 传入当前时间戳 now 确保一致性
-        const selected = availableAndHealthyProviders.sort((a, b) => {
-            const scoreA = this._calculateNodeScore(a, now);
-            const scoreB = this._calculateNodeScore(b, now);
-            if (scoreA !== scoreB) return scoreA - scoreB;
-            // 如果分值相同，使用 UUID 排序确保确定性
-            return a.uuid < b.uuid ? -1 : 1;
-        })[0];
+        // P4 优化：使用 O(n) 线性扫描找最小值，而不是 O(n log n) 排序
+        // 只需要找到分数最低的 provider，不需要完整排序
+        let selected = availableAndHealthyProviders[0];
+        let minScore = this._calculateNodeScore(selected, now);
+
+        for (let i = 1; i < availableAndHealthyProviders.length; i++) {
+            const provider = availableAndHealthyProviders[i];
+            const score = this._calculateNodeScore(provider, now);
+            if (score < minScore || (score === minScore && provider.uuid < selected.uuid)) {
+                selected = provider;
+                minScore = score;
+            }
+        }
+
+        // P5 Fix (方案B): 防止100ms内重复选择同一节点
+        const nowTs = Date.now();
+        const recentKey = `${providerType}:${selected.uuid}`;
+        const lastSelectTime = this._recentSelections.get(recentKey) || 0;
+
+        // 如果100ms内刚选过此节点，且有其他可选节点
+        if ((nowTs - lastSelectTime) < this._recentSelectionWindow &&
+            availableAndHealthyProviders.length > 1) {
+
+            // 找到第二优选项（排除刚选的）
+            let secondBest = null;
+            let secondMinScore = Infinity;
+
+            for (const provider of availableAndHealthyProviders) {
+                if (provider.uuid === selected.uuid) continue;
+                const score = this._calculateNodeScore(provider, now);
+                if (score < secondMinScore) {
+                    secondBest = provider;
+                    secondMinScore = score;
+                }
+            }
+
+            if (secondBest) {
+                this._log('debug', `[P5 Anti-Repeat] Avoided repeat selection of ${selected.uuid.substring(0, 8)}..., using ${secondBest.uuid.substring(0, 8)}... instead`);
+                selected = secondBest;
+                minScore = secondMinScore;
+            }
+        }
+
+        // 记录本次选择时间
+        this._recentSelections.set(recentKey, nowTs);
+
+        // 定期清理过期记录（每100次选择清理一次）
+        if ((++this._recentSelectionCleanupCounter) % 100 === 0) {
+            for (const [key, time] of this._recentSelections.entries()) {
+                if ((nowTs - time) > 1000) {  // 1秒后清理
+                    this._recentSelections.delete(key);
+                }
+            }
+            if (this._recentSelections.size < 50) {
+                this._log('debug', `[P5 Anti-Repeat] Cleanup: ${this._recentSelections.size} recent selections tracked`);
+            }
+        }
 
         // 始终更新 lastUsed（确保 LRU 策略生效，避免并发请求选到同一个 provider）
         // usageCount 只在请求成功后才增加（由 skipUsageCount 控制）
-        selected.config.lastUsed = new Date().toISOString();
-        
-        // 更新自增序列号，确保即使毫秒级并发，也能在下一轮排序中被区分开
-        this._selectionSequence++;
-        selected.config._lastSelectionSeq = this._selectionSequence;
-        
-        // Log selection at debug level with 10% sampling to reduce logging overhead
-        // Use info level only for sampled entries to assist with debugging when needed
+        // P4 优化：使用时间戳数字存储，并清除缓存
+        selected.config.lastUsed = new Date(nowTs).toISOString();
+        selected.config._lastUsedTs = nowTs;
+        selected.config._lastUsedSrc = selected.config.lastUsed;
+
+        // P5 Fix (方案A): 使用时间戳基序列号，避免冲突和进程重启后序列号倒退
+        const uniqueSeq = this._sequenceBase + (++this._selectionSequence);
+        selected.config._lastSelectionSeq = uniqueSeq;
+
+        // P5 Fix (方案D): 增强日志，显示诊断信息
+        const totalProviders = availableProviders.length;
+        const healthyProviders = availableAndHealthyProviders.length;
+        const scoreInfo = `Score:${minScore.toFixed(0)}`;
+        const poolInfo = `Pool:${healthyProviders}/${totalProviders}`;
+
         if (this._selectionSequence % 10 === 0) {
-            this._log('info', `[Concurrency Control] Atomic selection: ${selected.config.uuid} (Seq: ${this._selectionSequence})`);
+            this._log('info', `[Selection] ${selected.config.uuid.substring(0, 8)}... (Seq:${uniqueSeq}) | ${poolInfo} | ${scoreInfo}`);
         } else {
-            this._log('debug', `[Concurrency Control] Atomic selection: ${selected.config.uuid} (Seq: ${this._selectionSequence})`);
+            this._log('debug', `[Selection] ${selected.config.uuid.substring(0, 8)}... (Seq:${uniqueSeq}) | ${poolInfo} | ${scoreInfo}`);
+        }
+
+        // P5 Fix (方案D): 警告只有1个健康provider
+        if (healthyProviders === 1 && totalProviders > 1) {
+            this._log('warn', `Only 1/${totalProviders} providers healthy for ${providerType}. Load balancing unavailable.`);
         }
 
         if (!options.skipUsageCount) {
@@ -1505,31 +1649,41 @@ export class ProviderPoolManager {
 
     /**
      * 检查并恢复已到恢复时间的提供商
+     * P4 优化：添加节流机制，每秒最多执行一次，减少 CPU 开销
      * @param {string} [providerType] - 可选，指定要检查的提供商类型。如果不提供，检查所有类型
+     * @param {boolean} [force=false] - 是否强制执行，跳过节流检查
      * @private
      */
-    _checkAndRecoverScheduledProviders(providerType = null) {
-        const now = new Date();
+    _checkAndRecoverScheduledProviders(providerType = null, force = false) {
+        const nowTs = Date.now();
+
+        // P4 节流：除非强制执行，否则每秒最多检查一次
+        if (!force && (nowTs - this._lastRecoveryCheckTime) < this._recoveryCheckThrottleMs) {
+            return;
+        }
+        this._lastRecoveryCheckTime = nowTs;
+
         const typesToCheck = providerType ? [providerType] : Object.keys(this.providerStatus);
-        
+
         for (const type of typesToCheck) {
             const providers = this.providerStatus[type] || [];
             for (const providerStatus of providers) {
                 const config = providerStatus.config;
-                
+
                 // 检查是否有 scheduledRecoveryTime 且已到恢复时间
                 if (config.scheduledRecoveryTime && !config.isHealthy) {
-                    const recoveryTime = new Date(config.scheduledRecoveryTime);
-                    if (now >= recoveryTime) {
-                        this._log('info', `Auto-recovering provider ${config.uuid} (${type}). Scheduled recovery time reached: ${recoveryTime.toISOString()}`);
-                        
+                    // P4 优化：使用时间戳比较，避免创建 Date 对象
+                    const recoveryTimeTs = this._parseTimestamp(config.scheduledRecoveryTime, 'scheduledRecovery', config);
+                    if (nowTs >= recoveryTimeTs) {
+                        this._log('info', `Auto-recovering provider ${config.uuid} (${type}). Scheduled recovery time reached: ${config.scheduledRecoveryTime}`);
+
                         // 恢复健康状态
                         config.isHealthy = true;
                         config.errorCount = 0;
                         config.lastErrorTime = null;
                         config.lastErrorMessage = null;
                         config.scheduledRecoveryTime = null; // 清除恢复时间
-                        
+
                         // 保存更改
                         this._debouncedSave(type);
                     }
@@ -1545,9 +1699,10 @@ export class ProviderPoolManager {
     async performHealthChecks(isInit = false) {
         this._log('info', 'Performing health checks on all providers...');
         const now = new Date();
-        
+
         // 首先检查并恢复已到恢复时间的提供商
-        this._checkAndRecoverScheduledProviders();
+        // 强制执行，跳过节流检查（健康检查是周期性任务，频率不高）
+        this._checkAndRecoverScheduledProviders(null, true);
         
         for (const providerType in this.providerStatus) {
             for (const providerStatus of this.providerStatus[providerType]) {
@@ -1707,7 +1862,8 @@ export class ProviderPoolManager {
             const timeoutId = setTimeout(() => abortController.abort(), healthCheckTimeout);
 
             try {
-                this._log('debug', `Health check attempt ${i + 1}/${healthCheckRequests.length} for ${modelName}: ${JSON.stringify(healthCheckRequest)}`);
+                // P4 优化：使用延迟求值，避免在非 debug 模式下执行 JSON.stringify
+                this._log('debug', () => `Health check attempt ${i + 1}/${healthCheckRequests.length} for ${modelName}: ${JSON.stringify(healthCheckRequest)}`);
 
                 // 尝试将 signal 注入请求体，供支持的适配器使用
                 const requestWithSignal = {
