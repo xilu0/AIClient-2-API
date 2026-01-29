@@ -260,6 +260,24 @@ func (a *Aggregator) validateAndGetInput() json.RawMessage {
 func (a *Aggregator) Build() *MessageResponse {
 	a.finishCurrentBlock()
 
+	// Apply fallback logic for stop_reason if not set
+	// Priority: upstream stopReason > tool_use detection > end_turn default
+	if a.stopReason == "" {
+		// Check if any content blocks are tool_use type
+		hasToolUse := false
+		for _, block := range a.content {
+			if block.Type == "tool_use" {
+				hasToolUse = true
+				break
+			}
+		}
+		if hasToolUse {
+			a.stopReason = "tool_use"
+		} else {
+			a.stopReason = "end_turn"
+		}
+	}
+
 	// Calculate output tokens from accumulated text if not already set
 	outputTokens := a.outputTokens
 	if outputTokens == 0 && a.outputText != "" {

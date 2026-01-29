@@ -19,6 +19,11 @@ type Converter struct {
 	// Tool use tracking
 	inToolUse        bool
 	toolUseStartSent bool
+	hadToolUse       bool // Track if any tool use blocks were processed (for stop_reason)
+
+	// Content block state tracking (for proper SSE event ordering)
+	textBlockStarted    bool // Track if a text content block is open and needs closing
+	messageDeltaEmitted bool // Track if message_delta has been sent by converter
 
 	// Token tracking
 	estimatedInputTokens   int
@@ -47,6 +52,15 @@ func NewConverterWithEstimate(model string, estimatedInputTokens int) *Converter
 // GetMessageID returns the generated message ID.
 func (c *Converter) GetMessageID() string {
 	return c.messageID
+}
+
+// GetStopReason returns the appropriate stop_reason based on what was processed.
+// Returns "tool_use" if any tool use blocks were emitted, otherwise "end_turn".
+func (c *Converter) GetStopReason() string {
+	if c.hadToolUse {
+		return "tool_use"
+	}
+	return "end_turn"
 }
 
 // Convert converts a Kiro chunk to Claude SSE events.
@@ -117,6 +131,7 @@ func (c *Converter) convertKiroContent(chunk *kiro.KiroChunk) ([]*SSEEvent, erro
 	if !c.contentStarted {
 		c.contentStarted = true
 		c.messageStartSent = true
+		c.textBlockStarted = true // Mark that we have an open text block
 
 		// Send message_start
 		events = append(events, c.createMessageStart())
@@ -185,10 +200,22 @@ func (c *Converter) convertToolUse(chunk *kiro.KiroChunk) ([]*SSEEvent, error) {
 			events = append(events, c.createMessageStart())
 		}
 
+		// CRITICAL: Close any open text block before starting tool_use
+		// This ensures proper SSE event ordering: text content_block_stop must come before tool_use content_block_start
+		if c.textBlockStarted {
+			stopEvent := ContentBlockStopEvent{
+				Type:  "content_block_stop",
+				Index: c.contentIndex,
+			}
+			events = append(events, &SSEEvent{Type: "content_block_stop", Data: stopEvent})
+			c.textBlockStarted = false
+		}
+
 		// Increment content index for the new tool_use block
 		c.contentIndex++
 		c.inToolUse = true
 		c.toolUseStartSent = true
+		c.hadToolUse = true // Mark that we've processed a tool use block
 
 		// Send content_block_start
 		contentBlockStart := ContentBlockStartEvent{
@@ -418,6 +445,9 @@ func (c *Converter) convertMessageDelta(chunk *kiro.KiroChunk) ([]*SSEEvent, err
 		},
 	}
 
+	// Mark that message_delta has been emitted by the converter
+	c.messageDeltaEmitted = true
+
 	return []*SSEEvent{{Type: "message_delta", Data: event}}, nil
 }
 
@@ -481,4 +511,29 @@ func (c *Converter) GetFinalUsage() Usage {
 		CacheCreationInputTokens: distributed.CacheCreationInputTokens,
 		CacheReadInputTokens:     distributed.CacheReadInputTokens,
 	}
+}
+
+// HasOpenContentBlock returns true if there's an unclosed content block that needs a stop event.
+// This is used by the handler to determine if a final content_block_stop should be sent.
+func (c *Converter) HasOpenContentBlock() bool {
+	return c.textBlockStarted || c.inToolUse
+}
+
+// GetCurrentContentIndex returns the current content block index.
+// This is used by the handler when sending final content_block_stop events.
+func (c *Converter) GetCurrentContentIndex() int {
+	return c.contentIndex
+}
+
+// WasMessageDeltaEmitted returns true if the converter already emitted a message_delta event.
+// This prevents the handler from sending a duplicate message_delta.
+func (c *Converter) WasMessageDeltaEmitted() bool {
+	return c.messageDeltaEmitted
+}
+
+// MarkContentBlockClosed marks the current content block as closed.
+// This is called by the handler after sending a final content_block_stop.
+func (c *Converter) MarkContentBlockClosed() {
+	c.textBlockStarted = false
+	c.inToolUse = false
 }
