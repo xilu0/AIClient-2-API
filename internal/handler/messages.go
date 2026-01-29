@@ -257,15 +257,13 @@ func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, ss
 	converter := claude.NewConverterWithEstimate(model, estimatedInputTokens)
 
 	buf := make([]byte, 4096)
-	contentBlockStarted := false
-	contentBlockIndex := 0
 
 	// Read and process chunks
 	for {
 		select {
 		case <-ctx.Done():
 			// Send final events on context cancellation
-			h.sendFinalStreamEvents(sseWriter, converter, contentBlockStarted, contentBlockIndex)
+			h.sendFinalStreamEvents(sseWriter, converter)
 			return
 		default:
 		}
@@ -274,7 +272,7 @@ func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, ss
 		if err != nil {
 			if err == io.EOF {
 				// End of stream - send final events
-				h.sendFinalStreamEvents(sseWriter, converter, contentBlockStarted, contentBlockIndex)
+				h.sendFinalStreamEvents(sseWriter, converter)
 			} else {
 				h.logger.Error("error reading response", "error", err)
 			}
@@ -320,13 +318,6 @@ func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, ss
 					continue
 				}
 
-				// Track content block state
-				if event.Type == "content_block_start" {
-					contentBlockStarted = true
-				} else if event.Type == "content_block_stop" {
-					contentBlockIndex++
-				}
-
 				if err := sseWriter.WriteEvent(event.Type, event.Data); err != nil {
 					h.logger.Error("failed to write SSE event", "error", err)
 					return
@@ -337,28 +328,39 @@ func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, ss
 }
 
 // sendFinalStreamEvents sends the final SSE events at the end of a stream.
-func (h *MessagesHandler) sendFinalStreamEvents(sseWriter *claude.SSEWriter, converter *claude.Converter, contentBlockStarted bool, contentBlockIndex int) {
+// Uses the converter's state to avoid sending duplicate events.
+func (h *MessagesHandler) sendFinalStreamEvents(sseWriter *claude.SSEWriter, converter *claude.Converter) {
 	// Get final usage from converter
 	finalUsage := converter.GetFinalUsage()
 
-	// Send content_block_stop if we started a content block
-	if contentBlockStarted {
-		if err := sseWriter.WriteContentBlockStop(contentBlockIndex); err != nil {
+	// Send content_block_stop only if there's an unclosed content block
+	// The converter tracks this state and handles closing text blocks before tool_use
+	if converter.HasOpenContentBlock() {
+		if err := sseWriter.WriteContentBlockStop(converter.GetCurrentContentIndex()); err != nil {
 			h.logger.Error("failed to write content_block_stop", "error", err)
 		}
+		converter.MarkContentBlockClosed()
 	}
 
-	// Send message_delta with final usage (using typed struct for efficiency)
-	// Note: SSEUsage has different json tags than Usage, so explicit copy is intentional
-	messageDeltaEvent := claude.FullMessageDeltaEvent{
-		Type: "message_delta",
-		Delta: claude.MessageDeltaData{
-			StopReason: "end_turn",
-		},
-		Usage: claude.SSEUsage(finalUsage),
-	}
-	if err := sseWriter.WriteEvent("message_delta", messageDeltaEvent); err != nil {
-		h.logger.Error("failed to write message_delta", "error", err)
+	// Only send message_delta if the converter hasn't already sent one
+	// This prevents duplicate message_delta events which can confuse clients
+	if !converter.WasMessageDeltaEmitted() {
+		// Get the appropriate stop_reason based on what was processed
+		// If tool_use blocks were emitted, use "tool_use", otherwise "end_turn"
+		stopReason := converter.GetStopReason()
+
+		// Send message_delta with final usage (using typed struct for efficiency)
+		// Note: SSEUsage has different json tags than Usage, so explicit copy is intentional
+		messageDeltaEvent := claude.FullMessageDeltaEvent{
+			Type: "message_delta",
+			Delta: claude.MessageDeltaData{
+				StopReason: stopReason,
+			},
+			Usage: claude.SSEUsage(finalUsage),
+		}
+		if err := sseWriter.WriteEvent("message_delta", messageDeltaEvent); err != nil {
+			h.logger.Error("failed to write message_delta", "error", err)
+		}
 	}
 
 	// Send message_stop
