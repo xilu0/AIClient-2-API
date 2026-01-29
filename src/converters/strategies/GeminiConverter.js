@@ -26,6 +26,31 @@ import {
     generateResponseCompleted
 } from '../../providers/openai/openai-responses-core.mjs';
 
+// P2-3: 预编译工具名映射，避免每次调用 toLowerCase
+// P2-3: 预编译工具名到类别的映射，支持大小写不敏感查找
+const TOOL_NAME_CATEGORY = Object.freeze({
+    // 搜索类工具（小写）
+    'grep': 'search',
+    'search': 'search',
+    'search_code_definitions': 'search',
+    'search_code_snippets': 'search',
+    // glob 工具
+    'glob': 'glob',
+    // read 工具
+    'read': 'read',
+    // ls 工具
+    'ls': 'ls',
+    // 特殊工具
+    'enterplanmode': 'enterplanmode',
+});
+
+/**
+ * P2-3: 获取工具类别，优先直接匹配，回退到小写匹配
+ */
+function getToolCategory(toolName) {
+    return TOOL_NAME_CATEGORY[toolName] || TOOL_NAME_CATEGORY[toolName.toLowerCase()] || 'default';
+}
+
 /**
  * [FIX] 参考 ag/response.rs 和 ag/streaming.rs 的 remap_function_call_args 函数
  * 修复 Gemini 返回的工具参数名称问题
@@ -33,20 +58,18 @@ import {
  */
 function remapFunctionCallArgs(toolName, args) {
     if (!args || typeof args !== 'object') return args;
-    
+
     const remappedArgs = { ...args };
-    const toolNameLower = toolName.toLowerCase();
-    
+    // P2-3: 使用预编译类别映射替代 toLowerCase + switch
+    const category = getToolCategory(toolName);
+
     // [IMPORTANT] Claude Code CLI 的 EnterPlanMode 工具禁止携带任何参数
-    if (toolName === 'EnterPlanMode') {
+    if (category === 'enterplanmode') {
         return {};
     }
-    
-    switch (toolNameLower) {
-        case 'grep':
+
+    switch (category) {
         case 'search':
-        case 'search_code_definitions':
-        case 'search_code_snippets':
             // [FIX] Gemini hallucination: maps parameter description to "description" field
             if (remappedArgs.description && !remappedArgs.pattern) {
                 remappedArgs.pattern = remappedArgs.description;

@@ -23,6 +23,16 @@ const KIRO_THINKING = {
     MAX_LEN_TAG: '<max_thinking_length>',
 };
 
+// P1-1: 预编译 JSON 模式数组，避免每次调用时创建
+const KIRO_JSON_PATTERNS = Object.freeze([
+    '{"content":',
+    '{"name":',
+    '{"followupPrompt":',
+    '{"input":',
+    '{"stop":',
+    '{"contextUsagePercentage":'
+]);
+
 const KIRO_CONSTANTS = {
     REFRESH_URL: 'https://prod.{{region}}.auth.desktop.kiro.dev/refreshToken',
     REFRESH_IDC_URL: 'https://oidc.{{region}}.amazonaws.com/token',
@@ -954,6 +964,8 @@ async saveCredentialsToFile(filePath, newData) {
         let toolsContext = {};
         if (tools && Array.isArray(tools) && tools.length > 0) {
             // 过滤掉 web_search 或 websearch 工具（忽略大小写）
+            // TODO: 研究 Kiro 后端是否真的不支持 WebSearch，或者是否有替代方案
+            // TODO: 如果 Kiro 支持 WebSearch，需要研究正确的工具格式转换方式
             const filteredTools = tools.filter(tool => {
                 const name = (tool.name || '').toLowerCase();
                 const shouldIgnore = name === 'web_search' || name === 'websearch';
@@ -967,19 +979,16 @@ async saveCredentialsToFile(filePath, newData) {
                 // 所有工具都被过滤掉了，不添加 tools 上下文
                 console.log('[Kiro] All tools were filtered out');
             } else {
-            const MAX_DESCRIPTION_LENGTH = 9216;
+            // 不限制工具描述长度，仅记录超长描述供调试
+            const LONG_DESCRIPTION_THRESHOLD = 9216;
 
-            let truncatedCount = 0;
             const kiroTools = filteredTools.map(tool => {
-                let desc = tool.description || "";
-                const originalLength = desc.length;
-                
-                if (desc.length > MAX_DESCRIPTION_LENGTH) {
-                    desc = desc.substring(0, MAX_DESCRIPTION_LENGTH) + "...";
-                    truncatedCount++;
-                    console.log(`[Kiro] Truncated tool '${tool.name}' description: ${originalLength} -> ${desc.length} chars`);
+                const desc = tool.description || "";
+
+                if (desc.length > LONG_DESCRIPTION_THRESHOLD) {
+                    console.log(`[Kiro] Tool '${tool.name}' has long description: ${desc.length} chars`);
                 }
-                
+
                 return {
                     toolSpecification: {
                         name: tool.name,
@@ -990,10 +999,6 @@ async saveCredentialsToFile(filePath, newData) {
                     }
                 };
             });
-            
-            if (truncatedCount > 0) {
-                console.log(`[Kiro] Truncated ${truncatedCount} tool description(s) to max ${MAX_DESCRIPTION_LENGTH} chars`);
-            }
 
             toolsContext = { tools: kiroTools };
             }
@@ -1195,6 +1200,8 @@ async saveCredentialsToFile(filePath, newData) {
         } else {
             // 最后一条消息是 user，需要确保 history 最后一个元素是 assistantResponseMessage
             // Kiro API 要求 history 必须以 assistantResponseMessage 结尾
+            // TODO: 研究这种补全空 assistantResponseMessage 的方式是否会影响模型行为
+            // TODO: 'Continue' 文本是否合适？是否有更好的占位内容？
             if (history.length > 0) {
                 const lastHistoryItem = history[history.length - 1];
                 if (!lastHistoryItem.assistantResponseMessage) {
@@ -1792,18 +1799,9 @@ async saveCredentialsToFile(filePath, newData) {
      * @private
      */
     _findNextJsonStart(str, searchStart) {
-        // JSON patterns to search for
-        const patterns = [
-            '{"content":',
-            '{"name":',
-            '{"followupPrompt":',
-            '{"input":',
-            '{"stop":',
-            '{"contextUsagePercentage":'
-        ];
-
+        // P1-1: 使用预编译的模式数组
         let minPos = -1;
-        for (const pattern of patterns) {
+        for (const pattern of KIRO_JSON_PATTERNS) {
             const pos = str.indexOf(pattern, searchStart);
             if (pos >= 0 && (minPos < 0 || pos < minPos)) {
                 minPos = pos;
@@ -1953,19 +1951,49 @@ async saveCredentialsToFile(filePath, newData) {
                 let bufferLen = 0;
                 let lastContentEvent = null;
 
+                // P0-1: 优化流式处理，只有当可能有完整 JSON 时才触发解析
+                const BUFFER_THRESHOLD = 4096;
+                const JSON_END_MARKER = '}';
+
                 for await (const chunk of stream) {
                     const chunkStr = chunk.toString();
                     bufferParts.push(chunkStr);
                     bufferLen += chunkStr.length;
 
-                    // Only join when we have accumulated enough data to potentially parse
-                    // This avoids O(n²) string concatenation
+                    // P0-1: 只有当 buffer 达到阈值或检测到可能有完整 JSON 时才触发解析
+                    const mayHaveCompleteJson = chunkStr.includes(JSON_END_MARKER);
+
+                    if (bufferLen >= BUFFER_THRESHOLD || mayHaveCompleteJson) {
+                        const buffer = bufferParts.join('');
+                        const { events, remaining } = this.parseAwsEventStreamBuffer(buffer);
+                        // Reset to single-element array with remaining
+                        bufferParts = remaining ? [remaining] : [];
+                        bufferLen = remaining ? remaining.length : 0;
+
+                        for (const event of events) {
+                            if (event.type === 'content' && event.data) {
+                                if (lastContentEvent === event.data) {
+                                    continue;
+                                }
+                                lastContentEvent = event.data;
+                                yield { type: 'content', content: event.data };
+                            } else if (event.type === 'toolUse') {
+                                yield { type: 'toolUse', toolUse: event.data };
+                            } else if (event.type === 'toolUseInput') {
+                                yield { type: 'toolUseInput', input: event.data.input };
+                            } else if (event.type === 'toolUseStop') {
+                                yield { type: 'toolUseStop', stop: event.data.stop };
+                            } else if (event.type === 'contextUsage') {
+                                yield { type: 'contextUsage', contextUsagePercentage: event.data.contextUsagePercentage };
+                            }
+                        }
+                    }
+                }
+
+                // P0-1: 循环结束后处理剩余数据（关键边界条件）
+                if (bufferParts.length > 0 && bufferLen > 0) {
                     const buffer = bufferParts.join('');
-                    const { events, remaining } = this.parseAwsEventStreamBuffer(buffer);
-                    // Reset to single-element array with remaining
-                    bufferParts = remaining ? [remaining] : [];
-                    bufferLen = remaining ? remaining.length : 0;
-                    
+                    const { events } = this.parseAwsEventStreamBuffer(buffer);
                     for (const event of events) {
                         if (event.type === 'content' && event.data) {
                             if (lastContentEvent === event.data) {

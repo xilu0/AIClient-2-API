@@ -109,6 +109,9 @@ export class ProviderPoolManager {
         this._recentSelectionWindow = options.globalConfig?.RECENT_SELECTION_WINDOW ?? 100;
         this._recentSelectionCleanupCounter = 0;
 
+        // P1-2: Provider UUID 索引，O(1) 查询
+        this._providerIndex = new Map(); // Map<uuid, { providerType, statusEntry }>
+
         this.initializeProviderStatus();
     }
 
@@ -655,6 +658,7 @@ export class ProviderPoolManager {
 
     /**
      * 查找指定的 provider
+     * P1-2: 使用索引实现 O(1) 查询
      * @private
      */
     _findProvider(providerType, uuid) {
@@ -662,6 +666,12 @@ export class ProviderPoolManager {
             this._log('error', `Invalid parameters: providerType=${providerType}, uuid=${uuid}`);
             return null;
         }
+        // P1-2: 优先使用索引查找
+        const indexed = this._providerIndex.get(uuid);
+        if (indexed && indexed.providerType === providerType) {
+            return indexed.statusEntry;
+        }
+        // 回退到线性搜索（索引可能不同步时）
         const pool = this.providerStatus[providerType];
         return pool?.find(p => p.uuid === uuid) || null;
     }
@@ -744,6 +754,9 @@ export class ProviderPoolManager {
      * Initially, all providers are considered healthy and have zero usage.
      */
     initializeProviderStatus() {
+        // P1-2: 重建索引前先清空
+        this._providerIndex.clear();
+
         for (const providerType in this.providerPools) {
             this.providerStatus[providerType] = [];
             this.roundRobinIndex[providerType] = 0; // Initialize round-robin index for each type
@@ -758,26 +771,30 @@ export class ProviderPoolManager {
                 providerConfig.lastUsed = providerConfig.lastUsed !== undefined ? providerConfig.lastUsed : null;
                 providerConfig.usageCount = providerConfig.usageCount !== undefined ? providerConfig.usageCount : 0;
                 providerConfig.errorCount = providerConfig.errorCount !== undefined ? providerConfig.errorCount : 0;
-                
+
                 // --- V2: 刷新监控字段 ---
                 providerConfig.needsRefresh = providerConfig.needsRefresh !== undefined ? providerConfig.needsRefresh : false;
                 providerConfig.refreshCount = providerConfig.refreshCount !== undefined ? providerConfig.refreshCount : 0;
-                
+
                 // 优化2: 简化 lastErrorTime 处理逻辑
                 providerConfig.lastErrorTime = providerConfig.lastErrorTime instanceof Date
                     ? providerConfig.lastErrorTime.toISOString()
                     : (providerConfig.lastErrorTime || null);
-                
+
                 // 健康检测相关字段
                 providerConfig.lastHealthCheckTime = providerConfig.lastHealthCheckTime || null;
                 providerConfig.lastHealthCheckModel = providerConfig.lastHealthCheckModel || null;
                 providerConfig.lastErrorMessage = providerConfig.lastErrorMessage || null;
                 providerConfig.customName = providerConfig.customName || null;
 
-                this.providerStatus[providerType].push({
+                const statusEntry = {
                     config: providerConfig,
                     uuid: providerConfig.uuid, // Still keep uuid at the top level for easy access
-                });
+                };
+                this.providerStatus[providerType].push(statusEntry);
+
+                // P1-2: 添加到索引
+                this._providerIndex.set(providerConfig.uuid, { providerType, statusEntry });
             });
         }
         this._log('info', `Initialized provider statuses: ok (maxErrorCount: ${this.maxErrorCount})`);
@@ -1698,30 +1715,35 @@ export class ProviderPoolManager {
      */
     async performHealthChecks(isInit = false) {
         this._log('info', 'Performing health checks on all providers...');
-        const now = new Date();
+        // P1-3: 使用时间戳比较，避免在循环中创建 Date 对象
+        const nowTs = Date.now();
 
         // 首先检查并恢复已到恢复时间的提供商
         // 强制执行，跳过节流检查（健康检查是周期性任务，频率不高）
         this._checkAndRecoverScheduledProviders(null, true);
-        
+
         for (const providerType in this.providerStatus) {
             for (const providerStatus of this.providerStatus[providerType]) {
                 const providerConfig = providerStatus.config;
 
                 // 如果提供商有 scheduledRecoveryTime 且未到恢复时间，跳过健康检查
                 if (providerConfig.scheduledRecoveryTime && !providerConfig.isHealthy) {
-                    const recoveryTime = new Date(providerConfig.scheduledRecoveryTime);
-                    if (now < recoveryTime) {
-                        this._log('debug', `Skipping health check for ${providerConfig.uuid} (${providerType}). Waiting for scheduled recovery at ${recoveryTime.toISOString()}`);
+                    // P1-3: 使用 _parseTimestamp 替代 new Date()
+                    const recoveryTimeTs = this._parseTimestamp(providerConfig.scheduledRecoveryTime, 'scheduledRecovery', providerConfig);
+                    if (nowTs < recoveryTimeTs) {
+                        this._log('debug', `Skipping health check for ${providerConfig.uuid} (${providerType}). Waiting for scheduled recovery at ${providerConfig.scheduledRecoveryTime}`);
                         continue;
                     }
                 }
 
                 // Only attempt to health check unhealthy providers after a certain interval
-                if (!providerStatus.config.isHealthy && providerStatus.config.lastErrorTime &&
-                    (now.getTime() - new Date(providerStatus.config.lastErrorTime).getTime() < this.healthCheckInterval)) {
-                    this._log('debug', `Skipping health check for ${providerConfig.uuid} (${providerType}). Last error too recent.`);
-                    continue;
+                // P1-3: 使用 _parseTimestamp 替代 new Date()
+                if (!providerStatus.config.isHealthy && providerStatus.config.lastErrorTime) {
+                    const lastErrorTs = this._parseTimestamp(providerStatus.config.lastErrorTime, 'lastError', providerStatus.config);
+                    if (nowTs - lastErrorTs < this.healthCheckInterval) {
+                        this._log('debug', `Skipping health check for ${providerConfig.uuid} (${providerType}). Last error too recent.`);
+                        continue;
+                    }
                 }
 
                 try {

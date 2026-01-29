@@ -141,10 +141,60 @@ export class ClaudeApiService {
         try {
             const response = await this.client.post(endpoint, { ...body, stream: true }, { responseType: 'stream' });
             const reader = response.data;
-            let buffer = '';
+            // P0-2: 使用数组累积 + 条件合并，避免 O(n²) 字符串拼接
+            const bufferParts = [];
+            let bufferLen = 0;
 
             for await (const chunk of reader) {
-                buffer += chunk.toString('utf-8');
+                const chunkStr = chunk.toString('utf-8');
+                bufferParts.push(chunkStr);
+                bufferLen += chunkStr.length;
+
+                // P0-2: 只有检测到可能有完整事件时才合并处理
+                if (!chunkStr.includes('\n\n') && bufferLen < 4096) {
+                    continue;
+                }
+
+                let buffer = bufferParts.join('');
+                bufferParts.length = 0;
+                bufferLen = 0;
+
+                let boundary;
+                while ((boundary = buffer.indexOf('\n\n')) !== -1) {
+                    const eventBlock = buffer.substring(0, boundary);
+                    buffer = buffer.substring(boundary + 2);
+
+                    const lines = eventBlock.split('\n');
+                    let data = '';
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            data = line.substring(6).trim();
+                        }
+                    }
+
+                    if (data) {
+                        try {
+                            const parsedChunk = JSON.parse(data);
+                            yield parsedChunk;
+                            if (parsedChunk.type === 'message_stop') {
+                                return;
+                            }
+                        } catch (e) {
+                            console.warn("[ClaudeApiService] Failed to parse stream chunk JSON:", e.message, "Data:", data);
+                        }
+                    }
+                }
+
+                // P0-2: 将剩余内容放回 bufferParts
+                if (buffer.length > 0) {
+                    bufferParts.push(buffer);
+                    bufferLen = buffer.length;
+                }
+            }
+
+            // P0-2: 循环结束后处理剩余数据（关键边界条件）
+            if (bufferParts.length > 0) {
+                let buffer = bufferParts.join('');
                 let boundary;
                 while ((boundary = buffer.indexOf('\n\n')) !== -1) {
                     const eventBlock = buffer.substring(0, boundary);

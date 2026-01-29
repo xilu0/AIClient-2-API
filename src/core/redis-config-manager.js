@@ -466,18 +466,29 @@ class RedisConfigManager extends StorageAdapter {
     }
 
     async getProviderPool(providerType) {
+        // P2-2: 优先使用缓存，避免重复 JSON.parse
+        if (this._poolsCache && Date.now() - this._poolsCacheTime < this._cacheMaxAge) {
+            return this._poolsCache[providerType] || [];
+        }
+
         const client = this.redisManager.getClient();
         if (!client || !this.redisManager.isConnected()) {
             console.warn(`[RedisConfig] Redis not connected, returning empty pool for ${providerType}`);
-            return [];
+            // P2-2: 即使 Redis 不可用，也尝试返回缓存数据
+            return this._poolsCache?.[providerType] || [];
         }
 
         try {
             const providers = await client.hgetall(this._key(`pools:${providerType}`));
-            return Object.values(providers).map(p => JSON.parse(p));
+            const parsed = Object.values(providers).map(p => JSON.parse(p));
+            // P2-2: 更新单个 providerType 的缓存
+            if (!this._poolsCache) this._poolsCache = {};
+            this._poolsCache[providerType] = parsed;
+            return parsed;
         } catch (error) {
             console.error(`[RedisConfig] Failed to get provider pool ${providerType}:`, error.message);
-            return [];
+            // P2-2: 出错时返回缓存数据
+            return this._poolsCache?.[providerType] || [];
         }
     }
 

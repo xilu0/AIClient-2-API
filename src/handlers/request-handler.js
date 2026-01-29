@@ -169,6 +169,15 @@ export function createRequestHandler(config, providerPoolManager) {
             }
         }
 
+        // Kiro 遥测端点：静默返回成功，无需认证
+        // TODO: 研究是否需要将遥测数据转发到真实的 Kiro 服务器
+        // 警告：如果不把遥测数据伪装成 Kiro 会不会导致被封禁？需要进一步研究
+        if (path === '/api/event_logging/batch' || path.startsWith('/api/event_logging')) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true }));
+            return;
+        }
+
         // 1. 执行认证流程（只有 type='auth' 的插件参与）
         const authResult = await pluginManager.executeAuth(req, res, requestUrl, currentConfig);
         if (authResult.handled) {
