@@ -219,79 +219,117 @@ func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool,
 	// Map model name to Kiro model ID
 	kiroModel := mapModelToKiro(model)
 
-	// Build conversation history and current message
-	var history []map[string]interface{}
-	startIndex := 0
+	// Step 1: Parse and merge adjacent messages with same role (matching JS implementation)
+	type MergedMessage struct {
+		Role             string
+		UserContent      ParsedUserContent
+		AssistantContent ParsedAssistantContent
+	}
+	var mergedMessages []MergedMessage
 
-	// Handle system prompt - prepend to first user message (matching JS implementation)
-	if system != "" && len(claudeMessages) > 0 {
-		if claudeMessages[0].Role == "user" {
-			// Prepend system prompt to first user message content
-			parsed := parseMessageContent(claudeMessages[0].Content)
-			userMsg := map[string]interface{}{
-				"content": system + "\n\n" + parsed.Text,
-				"modelId": kiroModel,
-				"origin":  "AI_EDITOR",
-			}
-			// Add tool results if present
-			if len(parsed.ToolResults) > 0 {
-				userMsg["userInputMessageContext"] = map[string]interface{}{
-					"toolResults": parsed.ToolResults,
-				}
-			}
-			// Add images if present
-			if len(parsed.Images) > 0 {
-				userMsg["images"] = parsed.Images
-			}
-			history = append(history, map[string]interface{}{
-				"userInputMessage": userMsg,
-			})
-			startIndex = 1 // Start from second message
+	for _, msg := range claudeMessages {
+		var newMsg MergedMessage
+		if msg.Role == "user" {
+			newMsg.Role = "user"
+			newMsg.UserContent = parseMessageContent(msg.Content)
 		} else {
-			// Add system prompt as standalone user message
-			history = append(history, map[string]interface{}{
-				"userInputMessage": map[string]interface{}{
-					"content": system,
-					"modelId": kiroModel,
-					"origin":  "AI_EDITOR",
+			newMsg.Role = "assistant"
+			newMsg.AssistantContent = parseAssistantContent(msg.Content)
+		}
+
+		if len(mergedMessages) > 0 {
+			lastMsg := &mergedMessages[len(mergedMessages)-1]
+			if lastMsg.Role == newMsg.Role {
+				// Merge with previous message
+				if newMsg.Role == "user" {
+					if lastMsg.UserContent.Text != "" && newMsg.UserContent.Text != "" {
+						lastMsg.UserContent.Text += "\n" + newMsg.UserContent.Text
+					} else {
+						lastMsg.UserContent.Text += newMsg.UserContent.Text
+					}
+					lastMsg.UserContent.ToolResults = append(lastMsg.UserContent.ToolResults, newMsg.UserContent.ToolResults...)
+					lastMsg.UserContent.Images = append(lastMsg.UserContent.Images, newMsg.UserContent.Images...)
+				} else {
+					if lastMsg.AssistantContent.Text != "" && newMsg.AssistantContent.Text != "" {
+						lastMsg.AssistantContent.Text += "\n" + newMsg.AssistantContent.Text
+					} else {
+						lastMsg.AssistantContent.Text += newMsg.AssistantContent.Text
+					}
+					lastMsg.AssistantContent.ToolUses = append(lastMsg.AssistantContent.ToolUses, newMsg.AssistantContent.ToolUses...)
+				}
+				continue
+			}
+		}
+		mergedMessages = append(mergedMessages, newMsg)
+	}
+
+	// Step 2: Handle system prompt
+	if system != "" {
+		if len(mergedMessages) > 0 && mergedMessages[0].Role == "user" {
+			// Prepend system prompt to first user message
+			if mergedMessages[0].UserContent.Text != "" {
+				mergedMessages[0].UserContent.Text = system + "\n\n" + mergedMessages[0].UserContent.Text
+			} else {
+				mergedMessages[0].UserContent.Text = system
+			}
+		} else {
+			// Insert system prompt as new first user message
+			systemMsg := MergedMessage{
+				Role: "user",
+				UserContent: ParsedUserContent{
+					Text: system,
 				},
-			})
+			}
+			mergedMessages = append([]MergedMessage{systemMsg}, mergedMessages...)
 		}
 	}
 
-	// Process all messages except the last one as history
-	for i := startIndex; i < len(claudeMessages)-1; i++ {
-		msg := claudeMessages[i]
+	// Step 3: Build history and current message
+	var history []map[string]interface{}
 
-		switch msg.Role {
-		case "user":
-			parsed := parseMessageContent(msg.Content)
+	// Process all except last as history
+	for i := 0; i < len(mergedMessages)-1; i++ {
+		msg := mergedMessages[i]
+		if msg.Role == "user" {
+			content := msg.UserContent.Text
+			// Kiro API requires content to never be empty, even in history
+			if content == "" {
+				if len(msg.UserContent.ToolResults) > 0 {
+					content = "Tool results provided."
+				} else if len(msg.UserContent.Images) > 0 {
+					content = "Image provided."
+				} else {
+					content = "Continue"
+				}
+			}
+
 			userMsg := map[string]interface{}{
-				"content": parsed.Text,
+				"content": content,
 				"modelId": kiroModel,
 				"origin":  "AI_EDITOR",
 			}
-			// Add tool results if present
-			if len(parsed.ToolResults) > 0 {
+			if len(msg.UserContent.ToolResults) > 0 {
+				uniqueToolResults := deduplicateToolResults(msg.UserContent.ToolResults)
 				userMsg["userInputMessageContext"] = map[string]interface{}{
-					"toolResults": parsed.ToolResults,
+					"toolResults": uniqueToolResults,
 				}
 			}
-			// Add images if present
-			if len(parsed.Images) > 0 {
-				userMsg["images"] = parsed.Images
+			if len(msg.UserContent.Images) > 0 {
+				userMsg["images"] = msg.UserContent.Images
 			}
 			history = append(history, map[string]interface{}{
 				"userInputMessage": userMsg,
 			})
-		case "assistant":
-			parsed := parseAssistantContent(msg.Content)
-			assistantMsg := map[string]interface{}{
-				"content": parsed.Text,
+		} else {
+			content := msg.AssistantContent.Text
+			if content == "" {
+				content = "Continue"
 			}
-			// Add tool uses if present
-			if len(parsed.ToolUses) > 0 {
-				assistantMsg["toolUses"] = parsed.ToolUses
+			assistantMsg := map[string]interface{}{
+				"content": content,
+			}
+			if len(msg.AssistantContent.ToolUses) > 0 {
+				assistantMsg["toolUses"] = msg.AssistantContent.ToolUses
 			}
 			history = append(history, map[string]interface{}{
 				"assistantResponseMessage": assistantMsg,
@@ -299,43 +337,38 @@ func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool,
 		}
 	}
 
-	// Handle last message - it becomes currentMessage
-	lastMsg := claudeMessages[len(claudeMessages)-1]
+	// Handle last message (CurrentMessage)
+	lastMsg := mergedMessages[len(mergedMessages)-1]
 
 	var currentContent string
 	var currentToolResults []map[string]interface{}
 	var currentImages []map[string]interface{}
 
-	// If last message is assistant, move it to history and create user currentMessage with "Continue"
-	// Kiro API requires currentMessage to be userInputMessage type
 	if lastMsg.Role == "assistant" {
-		parsed := parseAssistantContent(lastMsg.Content)
-		content := parsed.Text
-		if content == "" {
-			content = "Continue"
-		}
+		// Move to history
 		assistantMsg := map[string]interface{}{
-			"content": content,
+			"content": lastMsg.AssistantContent.Text,
 		}
-		if len(parsed.ToolUses) > 0 {
-			assistantMsg["toolUses"] = parsed.ToolUses
+		if assistantMsg["content"] == "" {
+			assistantMsg["content"] = "Continue" // Fallback content
+		}
+		if len(lastMsg.AssistantContent.ToolUses) > 0 {
+			assistantMsg["toolUses"] = lastMsg.AssistantContent.ToolUses
 		}
 		history = append(history, map[string]interface{}{
 			"assistantResponseMessage": assistantMsg,
 		})
 		currentContent = "Continue"
 	} else {
-		// Last message is user
-		parsed := parseMessageContent(lastMsg.Content)
-		currentContent = parsed.Text
-		currentToolResults = parsed.ToolResults
-		currentImages = parsed.Images
+		// User message is current
+		currentContent = lastMsg.UserContent.Text
+		currentToolResults = lastMsg.UserContent.ToolResults
+		currentImages = lastMsg.UserContent.Images
 
-		// Kiro API requires history to end with assistantResponseMessage if currentMessage is user
+		// Ensure history ends with assistant
 		if len(history) > 0 {
 			lastHistoryItem := history[len(history)-1]
 			if _, hasUser := lastHistoryItem["userInputMessage"]; hasUser {
-				// History ends with userInputMessage, add empty assistantResponseMessage
 				history = append(history, map[string]interface{}{
 					"assistantResponseMessage": map[string]interface{}{
 						"content": "Continue",
@@ -464,13 +497,12 @@ func parseMessageContent(content json.RawMessage) ParsedUserContent {
 		case "text":
 			result.Text += block.Text
 		case "tool_result":
+			// Note: JS implementation always uses "success" status, ignoring is_error flag
+			// Kiro API may not accept "error" status, so we match JS behavior
 			toolResult := map[string]interface{}{
 				"content":   []map[string]interface{}{{"text": extractToolResultContent(block.Content)}},
 				"status":    "success",
 				"toolUseId": block.ToolUseID,
-			}
-			if block.IsError {
-				toolResult["status"] = "error"
 			}
 			result.ToolResults = append(result.ToolResults, toolResult)
 		case "image":

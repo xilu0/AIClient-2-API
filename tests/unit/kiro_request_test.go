@@ -403,10 +403,15 @@ func TestBuildRequestBody_ThinkingContent(t *testing.T) {
 
 func TestBuildRequestBody_HistoryEndsWithAssistant(t *testing.T) {
 	// When history ends with userInputMessage, should add empty assistantResponseMessage
+	// Note: Adjacent messages are now merged, so we need User->Assistant->User to create history
 	messages := []map[string]interface{}{
 		{
 			"role":    "user",
 			"content": "Hello",
+		},
+		{
+			"role":    "assistant",
+			"content": "Hi there",
 		},
 		{
 			"role":    "user",
@@ -426,8 +431,10 @@ func TestBuildRequestBody_HistoryEndsWithAssistant(t *testing.T) {
 	convState := req["conversationState"].(map[string]interface{})
 	history := convState["history"].([]interface{})
 
-	// History should end with assistantResponseMessage (added automatically)
-	require.GreaterOrEqual(t, len(history), 2)
+	// History should be [User, Assistant]
+	require.Len(t, history, 2)
+	
+	// Verify last history item is assistant
 	lastHistory := history[len(history)-1].(map[string]interface{})
 	_, hasAssistant := lastHistory["assistantResponseMessage"]
 	assert.True(t, hasAssistant, "history should end with assistantResponseMessage")
@@ -591,6 +598,103 @@ func TestBuildRequestBody_WithToolsFiltersWebSearch(t *testing.T) {
 	firstTool := kiroTools[0].(map[string]interface{})
 	toolSpec := firstTool["toolSpecification"].(map[string]interface{})
 	assert.Equal(t, "Read", toolSpec["name"])
+}
+
+func TestBuildRequestBody_DuplicateToolResultIdsInHistory(t *testing.T) {
+	// Test deduplication of tool results in history messages
+	messages := []map[string]interface{}{
+		{
+			"role": "user",
+			"content": []map[string]interface{}{
+				{
+					"type":        "tool_result",
+					"tool_use_id": "toolu_hist_dup",
+					"content":     "Result 1",
+				},
+				{
+					"type":        "tool_result",
+					"tool_use_id": "toolu_hist_dup", // Duplicate ID in history
+					"content":     "Result 2",
+				},
+			},
+		},
+		{
+			"role":    "assistant",
+			"content": "Got it.",
+		},
+		{
+			"role":    "user",
+			"content": "Continue",
+		},
+	}
+	messagesJSON, err := json.Marshal(messages)
+	require.NoError(t, err)
+
+	body, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
+	require.NoError(t, err)
+
+	var req map[string]interface{}
+	err = json.Unmarshal(body, &req)
+	require.NoError(t, err)
+
+	convState := req["conversationState"].(map[string]interface{})
+	history := convState["history"].([]interface{})
+
+	// Find user message with tool results in history
+	var toolResults []interface{}
+	for _, h := range history {
+		item := h.(map[string]interface{})
+		if userMsg, ok := item["userInputMessage"].(map[string]interface{}); ok {
+			if ctx, ok := userMsg["userInputMessageContext"].(map[string]interface{}); ok {
+				if tr, ok := ctx["toolResults"].([]interface{}); ok {
+					toolResults = tr
+					break
+				}
+			}
+		}
+	}
+
+	// Should only have 1 unique tool result (deduplicated)
+	require.NotNil(t, toolResults, "expected toolResults in history")
+	assert.Len(t, toolResults, 1)
+}
+
+func TestBuildRequestBody_ToolResultStatusAlwaysSuccess(t *testing.T) {
+	// Test that tool results always use "success" status, even with is_error flag
+	messages := []map[string]interface{}{
+		{
+			"role": "user",
+			"content": []map[string]interface{}{
+				{
+					"type":        "tool_result",
+					"tool_use_id": "toolu_err",
+					"content":     "Error: file not found",
+					"is_error":    true, // This should be ignored
+				},
+			},
+		},
+	}
+	messagesJSON, err := json.Marshal(messages)
+	require.NoError(t, err)
+
+	body, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
+	require.NoError(t, err)
+
+	var req map[string]interface{}
+	err = json.Unmarshal(body, &req)
+	require.NoError(t, err)
+
+	convState := req["conversationState"].(map[string]interface{})
+	currentMsg := convState["currentMessage"].(map[string]interface{})
+	userInput := currentMsg["userInputMessage"].(map[string]interface{})
+	context := userInput["userInputMessageContext"].(map[string]interface{})
+	toolResults := context["toolResults"].([]interface{})
+
+	require.Len(t, toolResults, 1)
+	tr := toolResults[0].(map[string]interface{})
+
+	// Status should always be "success" (matching JS implementation)
+	assert.Equal(t, "success", tr["status"])
 }
 
 func TestBuildRequestBody_WithToolResultsAndTools(t *testing.T) {
