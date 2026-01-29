@@ -1,6 +1,5 @@
 import { getServiceAdapter, serviceInstances } from '../providers/adapter.js';
 import { ProviderPoolManager } from '../providers/provider-pool-manager.js';
-import deepmerge from 'deepmerge';
 import * as fs from 'fs';
 import { promises as pfs } from 'fs';
 import * as path from 'path';
@@ -307,11 +306,14 @@ export async function initApiService(config, isReady = false) {
                 }
                 
                 try {
-                    // 合并全局配置和节点配置
-                    const nodeConfig = deepmerge(config, {
+                    // P1-8: 浅拷贝替代 deepmerge
+                    // 安全性说明：providerConfig 仅包含原始类型值（string/number/boolean），
+                    // 不存在嵌套对象引用，浅拷贝即可满足需求。providerPools 在下方立即删除。
+                    const nodeConfig = {
+                        ...config,
                         ...providerConfig,
                         MODEL_PROVIDER: providerType
-                    });
+                    };
                     delete nodeConfig.providerPools; // 移除 providerPools 避免递归
                     
                     // 初始化服务适配器
@@ -350,8 +352,12 @@ export async function getApiService(config, requestedModel = null, options = {})
         // selectProvider 现在是异步的，使用链式锁确保并发安全
         const selectedProviderConfig = await providerPoolManager.selectProvider(config.MODEL_PROVIDER, requestedModel, { skipUsageCount: true });
         if (selectedProviderConfig) {
-            // 合并选中的提供者配置到当前请求的 config 中
-            serviceConfig = deepmerge(config, selectedProviderConfig);
+            // P1-8: 浅拷贝替代 deepmerge
+            // 安全性说明：selectedProviderConfig 仅包含原始类型值，浅拷贝即可。
+            serviceConfig = {
+                ...config,
+                ...selectedProviderConfig
+            };
             delete serviceConfig.providerPools; // 移除 providerPools 属性
             config.uuid = serviceConfig.uuid;
             config.customName = serviceConfig.customName;
@@ -390,9 +396,13 @@ export async function getApiServiceWithFallback(config, requestedModel = null, o
         
         if (selectedResult) {
             const { config: selectedProviderConfig, actualProviderType: selectedType, isFallback: fallbackUsed, actualModel: fallbackModel } = selectedResult;
-            
-            // 合并选中的提供者配置到当前请求的 config 中
-            serviceConfig = deepmerge(config, selectedProviderConfig);
+
+            // P1-8: 浅拷贝替代 deepmerge
+            // 安全性说明：selectedProviderConfig 仅包含原始类型值，浅拷贝即可。
+            serviceConfig = {
+                ...config,
+                ...selectedProviderConfig
+            };
             delete serviceConfig.providerPools;
             
             actualProviderType = selectedType;

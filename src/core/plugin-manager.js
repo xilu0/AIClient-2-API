@@ -70,6 +70,9 @@ class PluginManager {
         this.pluginsConfig = { plugins: {} };
         /** @type {boolean} */
         this.initialized = false;
+        // P1-11: 缓存已启用的插件列表，避免每次请求都过滤排序
+        /** @type {Plugin[]|null} */
+        this._enabledPluginsCache = null;
     }
 
     /**
@@ -199,6 +202,8 @@ class PluginManager {
             return;
         }
         this.plugins.set(plugin.name, plugin);
+        // P1-11: 清除缓存，下次调用时重新计算
+        this._enabledPluginsCache = null;
         console.log(`[PluginManager] Registered plugin: ${plugin.name} v${plugin.version || '1.0.0'}`);
     }
 
@@ -268,19 +273,26 @@ class PluginManager {
      * @returns {Plugin[]}
      */
     getEnabledPlugins() {
-        return Array.from(this.plugins.values())
+        // P1-11: 使用缓存避免每次请求都过滤排序
+        if (this._enabledPluginsCache !== null) {
+            return this._enabledPluginsCache;
+        }
+
+        this._enabledPluginsCache = Array.from(this.plugins.values())
             .filter(p => p._enabled)
             .sort((a, b) => {
                 // 内置插件排在最后
                 const aBuiltin = a._builtin ? 1 : 0;
                 const bBuiltin = b._builtin ? 1 : 0;
                 if (aBuiltin !== bBuiltin) return aBuiltin - bBuiltin;
-                
+
                 // 按优先级排序（数字越小越先执行）
                 const aPriority = a._priority || 100;
                 const bPriority = b._priority || 100;
                 return aPriority - bPriority;
             });
+
+        return this._enabledPluginsCache;
     }
 
     /**
@@ -384,7 +396,7 @@ class PluginManager {
                 if (result.handled) {
                     return { handled: true };
                 }
-                
+
                 // 合并数据
                 if (result.data) {
                     Object.assign(config, result.data);

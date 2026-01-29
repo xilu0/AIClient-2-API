@@ -41,14 +41,14 @@ export class ClaudeUsageNormalizer extends UsageNormalizer {
             cache_read_input_tokens: usage.cache_read_input_tokens ?? 0
         };
 
-        // 如果配置了 token 分配策略且需要应用
+        // P2-18: 如果配置了 token 分配策略且需要应用（直接修改对象避免展开操作）
         if (this.tokenDistribution && options.applyDistribution) {
             const originalInputTokens = options.originalInputTokens ?? result.input_tokens;
             const distributed = this.tokenDistribution.distribute(originalInputTokens);
-            result = {
-                ...result,
-                ...distributed
-            };
+            // P2-18: 直接赋值字段，避免对象展开创建新对象
+            result.input_tokens = distributed.input_tokens;
+            result.cache_creation_input_tokens = distributed.cache_creation_input_tokens;
+            result.cache_read_input_tokens = distributed.cache_read_input_tokens;
         }
 
         return result;

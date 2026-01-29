@@ -6,6 +6,11 @@ import { convertData, getOpenAIStreamChunkStop } from '../convert/convert.js';
 import { ProviderStrategyFactory } from './provider-strategies.js';
 import { getPluginManager } from '../core/plugin-manager.js';
 
+// P1-9补充: 缓存序列化的 stop chunk，避免每次流式响应都重新序列化
+// 添加大小限制防止内存泄漏（最多缓存 100 个模型的 stop chunk）
+const stopChunkCache = new Map();
+const STOP_CHUNK_CACHE_MAX_SIZE = 100;
+
 // ==================== 网络错误处理 ====================
 
 /**
@@ -383,9 +388,18 @@ export async function handleStreamRequest(res, service, model, requestBody, from
                 await new Promise(resolve => setImmediate(resolve));
             }
         }
+        // P1-9补充: 使用缓存的序列化 stop chunk
         if (openStop && needsConversion) {
-            res.write(`data: ${JSON.stringify(getOpenAIStreamChunkStop(model))}\n\n`);
-            // console.log(`data: ${JSON.stringify(getOpenAIStreamChunkStop(model))}\n`);
+            let serializedStopChunk = stopChunkCache.get(model);
+            if (!serializedStopChunk) {
+                serializedStopChunk = JSON.stringify(getOpenAIStreamChunkStop(model));
+                // 防止缓存无限增长：超过限制时清空缓存
+                if (stopChunkCache.size >= STOP_CHUNK_CACHE_MAX_SIZE) {
+                    stopChunkCache.clear();
+                }
+                stopChunkCache.set(model, serializedStopChunk);
+            }
+            res.write(`data: ${serializedStopChunk}\n\n`);
         }
 
         // 流式请求成功完成，统计使用次数，错误次数重置为0

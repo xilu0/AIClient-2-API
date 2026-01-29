@@ -9,6 +9,18 @@ import { PROMPT_LOG_FILENAME } from '../core/config-manager.js';
 import { handleOllamaRequest, handleOllamaShow } from './ollama-handler.js';
 import { getPluginManager } from '../core/plugin-manager.js';
 
+// P2-17: 缓存日期字符串，避免每次请求都格式化
+let cachedDateString = new Date().toLocaleString();
+let lastDateUpdate = Date.now();
+function getCachedDateString() {
+    const now = Date.now();
+    if (now - lastDateUpdate > 1000) { // 每秒更新一次
+        cachedDateString = new Date().toLocaleString();
+        lastDateUpdate = now;
+    }
+    return cachedDateString;
+}
+
 /**
  * Parse request body as JSON
  * P0-3: Use Buffer.concat instead of string concatenation to avoid O(n²) complexity
@@ -79,7 +91,8 @@ export function createRequestHandler(config, providerPoolManager) {
             return true;
         }
 
-        console.log(`\n${new Date().toLocaleString()}`);
+        // P2-17: 使用缓存的日期字符串
+        console.log(`\n${getCachedDateString()}`);
         console.log(`[Server] Received request: ${req.method} http://${req.headers.host}${req.url}`);
 
         // Health check endpoint
@@ -135,21 +148,23 @@ export function createRequestHandler(config, providerPoolManager) {
             console.log(`[Config] MODEL_PROVIDER overridden by header to: ${currentConfig.MODEL_PROVIDER}`);
         }
           
+        // P1-8补充: 优化路径解析 - 延迟 split，只在需要时执行
         // Check if the first path segment matches a MODEL_PROVIDER and switch if it does
         // Note: 'ollama' is not a valid MODEL_PROVIDER, it's a protocol prefix for Ollama API compatibility
-        const pathSegments = path.split('/').filter(segment => segment.length > 0);
-        const isOllamaPath = pathSegments[0] === 'ollama' || path.startsWith('/api/');
-        
-        if (pathSegments.length > 0 && !isOllamaPath) {
-            const firstSegment = pathSegments[0];
-            const isValidProvider = MODEL_PROVIDER_SET.has(firstSegment); // P0-1: O(1) lookup
-            if (firstSegment && isValidProvider) {
+        const isOllamaPath = path.startsWith('/ollama/') || path === '/ollama' || path.startsWith('/api/');
+
+        if (!isOllamaPath && path.length > 1) {
+            // 快速提取第一段（避免完整 split）
+            const firstSlash = path.indexOf('/', 1);
+            const firstSegment = firstSlash > 0 ? path.substring(1, firstSlash) : path.substring(1);
+
+            if (firstSegment && MODEL_PROVIDER_SET.has(firstSegment)) { // P0-1: O(1) lookup
                 currentConfig.MODEL_PROVIDER = firstSegment;
                 console.log(`[Config] MODEL_PROVIDER overridden by path segment to: ${currentConfig.MODEL_PROVIDER}`);
-                pathSegments.shift();
-                path = '/' + pathSegments.join('/');
+                // 移除第一段：/provider/rest -> /rest
+                path = firstSlash > 0 ? path.substring(firstSlash) : '/';
                 requestUrl.pathname = path;
-            } else if (firstSegment && !isValidProvider) {
+            } else if (firstSegment && !MODEL_PROVIDER_SET.has(firstSegment)) {
                 console.log(`[Config] Ignoring invalid MODEL_PROVIDER in path segment: ${firstSegment}`);
             }
         }

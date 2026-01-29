@@ -155,14 +155,17 @@ export class OpenAIConverter extends BaseConverter {
                 });
                 claudeMessages.push({ role: 'user', content: content });
             } else if (message.role === 'assistant' && (message.tool_calls?.length || message.function_calls?.length)) {
-                // 助手工具调用消息 - 支持tool_calls和function_calls
+                // P1-12补充: 助手工具调用消息 - 使用 for 循环避免 map 创建临时数组
                 const calls = message.tool_calls || message.function_calls || [];
-                const toolUseBlocks = calls.map(tc => ({
-                    type: 'tool_use',
-                    id: tc.id,
-                    name: tc.function.name,
-                    input: safeParseJSON(tc.function.arguments)
-                }));
+                const toolUseBlocks = [];
+                for (const tc of calls) {
+                    toolUseBlocks.push({
+                        type: 'tool_use',
+                        id: tc.id,
+                        name: tc.function.name,
+                        input: safeParseJSON(tc.function.arguments)
+                    });
+                }
                 claudeMessages.push({ role: 'assistant', content: toolUseBlocks });
             } else {
                 // 普通消息
@@ -171,8 +174,9 @@ export class OpenAIConverter extends BaseConverter {
                         content.push({ type: 'text', text: message.content.trim() });
                     }
                 } else if (Array.isArray(message.content)) {
-                    message.content.forEach(item => {
-                        if (!item) return;
+                    // P1-12补充: 使用 for 循环代替 forEach
+                    for (const item of message.content) {
+                        if (!item) continue;
                         switch (item.type) {
                             case 'text':
                                 if (item.text) {
@@ -209,7 +213,7 @@ export class OpenAIConverter extends BaseConverter {
                                 }
                                 break;
                         }
-                    });
+                    }
                 }
                 if (content.length > 0) {
                     claudeMessages.push({ role: role, content: content });
@@ -226,9 +230,11 @@ export class OpenAIConverter extends BaseConverter {
             } else {
                 const lastMessage = mergedClaudeMessages[mergedClaudeMessages.length - 1];
 
-                // 如果当前消息的 role 与上一条消息的 role 相同，则合并 content 数组
+                // P1-12补充: 如果当前消息的 role 与上一条消息的 role 相同，则合并 content 数组（使用 push 避免 concat 创建新数组）
                 if (lastMessage.role === currentMessage.role) {
-                    lastMessage.content = lastMessage.content.concat(currentMessage.content);
+                    for (const block of currentMessage.content) {
+                        lastMessage.content.push(block);
+                    }
                 } else {
                     mergedClaudeMessages.push(currentMessage);
                 }

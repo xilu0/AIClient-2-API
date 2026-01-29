@@ -1817,31 +1817,31 @@ async saveCredentialsToFile(filePath, newData) {
     /**
      * 解析 AWS Event Stream 格式，提取所有完整的 JSON 事件
      * 返回 { events: 解析出的事件数组, remaining: 未处理完的缓冲区 }
-     * Optimized version using charCodeAt and helper methods.
+     * P1-9: Optimized to use index tracking instead of substring() to avoid O(n) string copies
      */
     parseAwsEventStreamBuffer(buffer) {
         const events = [];
-        let remaining = buffer;
-        let searchStart = 0;
+        let offsetStart = 0;  // P1-9: Track offset in original buffer instead of creating substrings
         const maxIterations = 500;
         let iterations = 0;
         let foundEndMarker = false;
 
         while (iterations < maxIterations && !foundEndMarker) {
-            // Find next JSON object start position
-            const jsonStart = this._findNextJsonStart(remaining, searchStart);
+            // P1-9: Find next JSON object start position (from current offset)
+            const jsonStart = this._findNextJsonStart(buffer, offsetStart);
             if (jsonStart < 0) break;
 
-            // Find matching closing brace using optimized helper
-            const jsonEnd = this._findJsonEnd(remaining, jsonStart);
+            // P1-9: Find matching closing brace
+            const jsonEnd = this._findJsonEnd(buffer, jsonStart);
 
             if (jsonEnd < 0) {
-                // Incomplete JSON, keep in buffer for next chunk
-                remaining = remaining.substring(jsonStart);
-                break;
+                // Incomplete JSON, return remaining buffer from jsonStart
+                const remaining = buffer.substring(jsonStart);
+                return { events, remaining };
             }
 
-            const jsonStr = remaining.substring(jsonStart, jsonEnd + 1);
+            // P1-9: Extract JSON string only once
+            const jsonStr = buffer.substring(jsonStart, jsonEnd + 1);
             try {
                 const parsed = JSON.parse(jsonStr);
 
@@ -1887,27 +1887,24 @@ async saveCredentialsToFile(filePath, newData) {
                 // JSON parse failed, skip this position and continue
             }
 
-            searchStart = jsonEnd + 1;
-            if (searchStart >= remaining.length) {
-                remaining = '';
-                break;
+            // P1-9: Move offset forward
+            offsetStart = jsonEnd + 1;
+            if (offsetStart >= buffer.length) {
+                return { events, remaining: '' };
             }
 
             iterations++;
         }
 
         if (iterations >= maxIterations) {
-            console.warn(`[Kiro] Event stream parsing exceeded max iterations (${maxIterations}), buffer size: ${remaining.length}, processed events: ${events.length}`);
-            remaining = '';
+            console.warn(`[Kiro] Event stream parsing exceeded max iterations (${maxIterations}), buffer size: ${buffer.length - offsetStart}, processed events: ${events.length}`);
+            return { events, remaining: '' };
         } else if (foundEndMarker) {
             console.log(`[Kiro] Event stream parsing completed normally, processed ${events.length} events in ${iterations} iterations`);
         }
 
-        // Trim remaining buffer if progress was made
-        if (searchStart > 0 && remaining.length > 0) {
-            remaining = remaining.substring(searchStart);
-        }
-
+        // P1-9: Return remaining buffer from current offset (single substring call)
+        const remaining = offsetStart > 0 ? buffer.substring(offsetStart) : buffer;
         return { events, remaining };
     }
 
@@ -2144,6 +2141,32 @@ async saveCredentialsToFile(filePath, newData) {
             }
         }
 
+        // P1-12: 统一的 tool call 完成处理，避免重复 JSON.parse
+        const finalizeToolCall = (toolCall) => {
+            if (!toolCall || toolCall._isParsed) {
+                return toolCall;
+            }
+
+            if (typeof toolCall.input === 'string') {
+                const trimmed = toolCall.input.trim();
+                // 快速检测是否为 JSON
+                if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+                    try {
+                        toolCall.input = JSON.parse(toolCall.input);
+                        toolCall._isParsed = true;
+                    } catch (e) {
+                        console.warn(`[Kiro] Tool input is not valid JSON, keeping as string`);
+                    }
+                }
+            } else {
+                toolCall._isParsed = true;
+            }
+
+            // 删除内部标志
+            delete toolCall._isParsed;
+            return toolCall;
+        };
+
         try {
             // Use array accumulation to avoid O(n²) string concatenation
             const totalContentParts = [];
@@ -2185,6 +2208,7 @@ async saveCredentialsToFile(filePath, newData) {
                     streamState.buffer += event.content;
                     const events = [];
 
+                    // P1-10: 优化 Thinking 块流处理，使用 substring 代替 slice
                     let loopCount = 0;
                     const maxLoops = 1000;
                     while (streamState.buffer.length > 0) {
@@ -2192,26 +2216,37 @@ async saveCredentialsToFile(filePath, newData) {
                             console.warn('[Kiro] Breaking infinite loop, remaining buffer:', streamState.buffer.length);
                             const rest = streamState.buffer;
                             streamState.buffer = '';
-                            if (rest) events.push(...createTextDeltaEvents(rest));
+                            // P1-10: 内联事件创建
+                            if (rest) {
+                                const textEvents = createTextDeltaEvents(rest);
+                                for (const evt of textEvents) events.push(evt);
+                            }
                             break;
                         }
 
                         if (!streamState.inThinking && !streamState.thinkingExtracted) {
                             const startPos = findRealTag(streamState.buffer, KIRO_THINKING.START_TAG);
                             if (startPos !== -1) {
-                                const before = streamState.buffer.slice(0, startPos);
-                                if (before) events.push(...createTextDeltaEvents(before));
+                                // P1-10: substring 代替 slice（V8 优化更好）
+                                const before = streamState.buffer.substring(0, startPos);
+                                if (before) {
+                                    const textEvents = createTextDeltaEvents(before);
+                                    for (const evt of textEvents) events.push(evt);
+                                }
 
-                                streamState.buffer = streamState.buffer.slice(startPos + KIRO_THINKING.START_TAG.length);
+                                streamState.buffer = streamState.buffer.substring(startPos + KIRO_THINKING.START_TAG.length);
                                 streamState.inThinking = true;
                                 continue;
                             }
 
                             const safeLen = Math.max(0, streamState.buffer.length - KIRO_THINKING.START_TAG.length);
                             if (safeLen > 0) {
-                                const safeText = streamState.buffer.slice(0, safeLen);
-                                if (safeText) events.push(...createTextDeltaEvents(safeText));
-                                streamState.buffer = streamState.buffer.slice(safeLen);
+                                const safeText = streamState.buffer.substring(0, safeLen);
+                                if (safeText) {
+                                    const textEvents = createTextDeltaEvents(safeText);
+                                    for (const evt of textEvents) events.push(evt);
+                                }
+                                streamState.buffer = streamState.buffer.substring(safeLen);
                             } else {
                                 // 防止无限循环：buffer太短时直接break
                                 break;
@@ -2222,27 +2257,36 @@ async saveCredentialsToFile(filePath, newData) {
                         if (streamState.inThinking) {
                             const endPos = findRealTag(streamState.buffer, KIRO_THINKING.END_TAG);
                             if (endPos !== -1) {
-                                const thinkingPart = streamState.buffer.slice(0, endPos);
-                                if (thinkingPart) events.push(...createThinkingDeltaEvents(thinkingPart));
+                                const thinkingPart = streamState.buffer.substring(0, endPos);
+                                if (thinkingPart) {
+                                    const thinkingEvents = createThinkingDeltaEvents(thinkingPart);
+                                    for (const evt of thinkingEvents) events.push(evt);
+                                }
 
-                                streamState.buffer = streamState.buffer.slice(endPos + KIRO_THINKING.END_TAG.length);
+                                streamState.buffer = streamState.buffer.substring(endPos + KIRO_THINKING.END_TAG.length);
                                 streamState.inThinking = false;
                                 streamState.thinkingExtracted = true;
 
-                                events.push(...createThinkingDeltaEvents(""));
-                                events.push(...stopBlock(streamState.thinkingBlockIndex));
+                                // P1-10: 内联事件创建
+                                const emptyEvents = createThinkingDeltaEvents("");
+                                for (const evt of emptyEvents) events.push(evt);
+                                const stopEvents = stopBlock(streamState.thinkingBlockIndex);
+                                for (const evt of stopEvents) events.push(evt);
 
                                 if (streamState.buffer.startsWith('\n\n')) {
-                                    streamState.buffer = streamState.buffer.slice(2);
+                                    streamState.buffer = streamState.buffer.substring(2);
                                 }
                                 continue;
                             }
 
                             const safeLen = Math.max(0, streamState.buffer.length - KIRO_THINKING.END_TAG.length);
                             if (safeLen > 0) {
-                                const safeThinking = streamState.buffer.slice(0, safeLen);
-                                if (safeThinking) events.push(...createThinkingDeltaEvents(safeThinking));
-                                streamState.buffer = streamState.buffer.slice(safeLen);
+                                const safeThinking = streamState.buffer.substring(0, safeLen);
+                                if (safeThinking) {
+                                    const thinkingEvents = createThinkingDeltaEvents(safeThinking);
+                                    for (const evt of thinkingEvents) events.push(evt);
+                                }
+                                streamState.buffer = streamState.buffer.substring(safeLen);
                             }
                             break;
                         }
@@ -2250,7 +2294,10 @@ async saveCredentialsToFile(filePath, newData) {
                         if (streamState.thinkingExtracted) {
                             const rest = streamState.buffer;
                             streamState.buffer = '';
-                            if (rest) events.push(...createTextDeltaEvents(rest));
+                            if (rest) {
+                                const textEvents = createTextDeltaEvents(rest);
+                                for (const evt of textEvents) events.push(evt);
+                            }
                             break;
                         }
                     }
@@ -2273,14 +2320,9 @@ async saveCredentialsToFile(filePath, newData) {
                             currentToolCall.input += tc.input || '';
                         } else {
                             // 不同的工具调用
-                            // 如果有未完成的工具调用，先保存它
+                            // P1-12: 如果有未完成的工具调用，先保存它（使用统一函数）
                             if (currentToolCall) {
-                                try {
-                                    currentToolCall.input = JSON.parse(currentToolCall.input);
-                                } catch (e) {
-                                    // input 不是有效 JSON，保持原样
-                                }
-                                toolCalls.push(currentToolCall);
+                                toolCalls.push(finalizeToolCall(currentToolCall));
                             }
                             // 开始新的工具调用
                             currentToolCall = {
@@ -2289,12 +2331,9 @@ async saveCredentialsToFile(filePath, newData) {
                                 input: tc.input || ''
                             };
                         }
-                        // 如果这个事件包含 stop，完成工具调用
+                        // P1-12: 如果这个事件包含 stop，完成工具调用
                         if (tc.stop) {
-                            try {
-                                currentToolCall.input = JSON.parse(currentToolCall.input);
-                            } catch (e) {}
-                            toolCalls.push(currentToolCall);
+                            toolCalls.push(finalizeToolCall(currentToolCall));
                             currentToolCall = null;
                         }
                     }
@@ -2308,25 +2347,17 @@ async saveCredentialsToFile(filePath, newData) {
                         currentToolCall.input += event.input || '';
                     }
                 } else if (event.type === 'toolUseStop') {
-                    // 工具调用结束事件
+                    // P1-12: 工具调用结束事件（使用统一函数）
                     if (currentToolCall && event.stop) {
-                        try {
-                            currentToolCall.input = JSON.parse(currentToolCall.input);
-                        } catch (e) {
-                            // input 不是有效 JSON，保持原样
-                        }
-                        toolCalls.push(currentToolCall);
+                        toolCalls.push(finalizeToolCall(currentToolCall));
                         currentToolCall = null;
                     }
                 }
             }
-            
-            // 处理未完成的工具调用（如果流提前结束）
+
+            // P1-12: 处理未完成的工具调用（如果流提前结束，使用统一函数）
             if (currentToolCall) {
-                try {
-                    currentToolCall.input = JSON.parse(currentToolCall.input);
-                } catch (e) {}
-                toolCalls.push(currentToolCall);
+                toolCalls.push(finalizeToolCall(currentToolCall));
                 currentToolCall = null;
             }
 

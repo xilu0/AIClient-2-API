@@ -661,12 +661,24 @@ export class GeminiApiService {
         for await (const line of rl) {
             if (line.startsWith("data: ")) buffer.push(line.slice(6));
             else if (line === "" && buffer.length > 0) {
-                try { yield JSON.parse(buffer.join('\n')); } catch (e) { console.error("[Stream] Failed to parse JSON chunk:", buffer.join('\n')); }
+                // P2-16: 优化 join - 单行时直接使用，避免 join 调用
+                const jsonStr = buffer.length === 1 ? buffer[0] : buffer.join('\n');
+                try {
+                    yield JSON.parse(jsonStr);
+                } catch (e) {
+                    console.error("[Stream] Failed to parse JSON chunk:", jsonStr);
+                }
                 buffer = [];
             }
         }
         if (buffer.length > 0) {
-            try { yield JSON.parse(buffer.join('\n')); } catch (e) { console.error("[Stream] Failed to parse final JSON chunk:", buffer.join('\n')); }
+            // P2-16: 优化 join - 单行时直接使用
+            const jsonStr = buffer.length === 1 ? buffer[0] : buffer.join('\n');
+            try {
+                yield JSON.parse(jsonStr);
+            } catch (e) {
+                console.error("[Stream] Failed to parse final JSON chunk:", jsonStr);
+            }
         }
     }
 
