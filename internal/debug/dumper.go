@@ -203,16 +203,42 @@ func (s *Session) AppendKiroChunk(chunk []byte) {
 	if s == nil {
 		return
 	}
+	s.appendToFile("kiro_chunks.jsonl", chunk)
+}
+
+// AppendClaudeChunk appends a converted Claude SSE event to claude_chunks.jsonl.
+func (s *Session) AppendClaudeChunk(eventType string, data interface{}) {
+	if s == nil {
+		return
+	}
+	// Format as SSE-like JSON for easy comparison
+	entry := map[string]interface{}{
+		"event": eventType,
+		"data":  data,
+	}
+	chunk, err := json.Marshal(entry)
+	if err != nil {
+		return
+	}
+	s.appendToFile("claude_chunks.jsonl", chunk)
+}
+
+// appendToFile appends data to a file in the session directory.
+func (s *Session) appendToFile(name string, data []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	path := filepath.Join(s.dir, "kiro_chunks.jsonl")
+	if s.closed {
+		return
+	}
+
+	path := filepath.Join(s.dir, name)
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return
 	}
 	defer f.Close()
-	f.Write(chunk)
+	f.Write(data)
 	f.Write([]byte("\n"))
 }
 

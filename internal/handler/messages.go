@@ -441,6 +441,11 @@ func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, ss
 					continue
 				}
 
+				// Dump Claude event for debugging
+				if debugSession != nil {
+					debugSession.AppendClaudeChunk(event.Type, event.Data)
+				}
+
 				if err := sseWriter.WriteEvent(event.Type, event.Data); err != nil {
 					h.logger.Error("failed to write SSE event", "error", err)
 					return
