@@ -18,9 +18,10 @@ const (
 
 // Dumper handles request/response dumping for debugging.
 type Dumper struct {
-	enabled bool
-	baseDir string
-	mu      sync.Mutex
+	enabled         bool
+	errorDumpAlways bool // Always dump on errors, even if debug is disabled
+	baseDir         string
+	mu              sync.Mutex
 }
 
 // Metadata contains debug metadata for a request.
@@ -33,42 +34,52 @@ type Metadata struct {
 	EndTime       time.Time `json:"end_time,omitempty"`
 	StatusCode    int       `json:"status_code,omitempty"`
 	Error         string    `json:"error,omitempty"`
+	ErrorType     string    `json:"error_type,omitempty"`
 	TriedAccounts []string  `json:"tried_accounts,omitempty"`
 }
 
 // Session represents a debug session for a single request.
 type Session struct {
-	dumper    *Dumper
-	sessionID string
-	dir       string
-	metadata  *Metadata
-	mu        sync.Mutex
-	closed    bool
+	dumper      *Dumper
+	sessionID   string
+	dir         string
+	metadata    *Metadata
+	mu          sync.Mutex
+	closed      bool
+	isErrorDump bool // If true, this is an error-only dump session
 }
 
 // NewDumper creates a new debug dumper.
-// Enable with GO_KIRO_DEBUG_DUMP=true environment variable.
+// Enable full debug with GO_KIRO_DEBUG_DUMP=true environment variable.
+// Error dumps are always enabled by default (disable with GO_KIRO_ERROR_DUMP=false).
 func NewDumper() *Dumper {
 	enabled := os.Getenv("GO_KIRO_DEBUG_DUMP") == "true"
+	errorDumpAlways := os.Getenv("GO_KIRO_ERROR_DUMP") != "false" // Default to true
 	baseDir := os.Getenv("GO_KIRO_DEBUG_DIR")
 	if baseDir == "" {
 		baseDir = DefaultDumpDir
 	}
 
-	if enabled {
+	if enabled || errorDumpAlways {
 		// Ensure base directory exists
 		_ = os.MkdirAll(baseDir, 0755)
 	}
 
 	return &Dumper{
-		enabled: enabled,
-		baseDir: baseDir,
+		enabled:         enabled,
+		errorDumpAlways: errorDumpAlways,
+		baseDir:         baseDir,
 	}
 }
 
-// Enabled returns whether debug dumping is enabled.
+// Enabled returns whether full debug dumping is enabled.
 func (d *Dumper) Enabled() bool {
 	return d.enabled
+}
+
+// ErrorDumpEnabled returns whether error dumping is enabled.
+func (d *Dumper) ErrorDumpEnabled() bool {
+	return d.errorDumpAlways
 }
 
 // NewSession creates a new debug session.
@@ -87,6 +98,30 @@ func (d *Dumper) NewSession(sessionID string) *Session {
 		dumper:    d,
 		sessionID: sessionID,
 		dir:       dir,
+		metadata: &Metadata{
+			SessionID: sessionID,
+			StartTime: time.Now(),
+		},
+	}
+}
+
+// NewErrorSession creates a session specifically for error dumping.
+// This works even when full debug is disabled, as long as error dumping is enabled.
+func (d *Dumper) NewErrorSession(sessionID string) *Session {
+	if !d.enabled && !d.errorDumpAlways {
+		return nil
+	}
+
+	dir := filepath.Join(d.baseDir, "errors", sessionID)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil
+	}
+
+	return &Session{
+		dumper:       d,
+		sessionID:    sessionID,
+		dir:          dir,
+		isErrorDump:  true,
 		metadata: &Metadata{
 			SessionID: sessionID,
 			StartTime: time.Now(),
@@ -142,6 +177,16 @@ func (s *Session) SetError(err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.metadata.Error = err.Error()
+}
+
+// SetErrorType sets the error type in metadata (e.g., "bad_request", "rate_limit").
+func (s *Session) SetErrorType(errType string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.metadata.ErrorType = errType
 }
 
 // SetStatusCode sets the status code in metadata.
