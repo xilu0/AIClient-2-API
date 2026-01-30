@@ -66,6 +66,7 @@ type Request struct {
 	ProfileARN string
 	Token      string
 	Body       []byte
+	Metadata   map[string]string // Metadata for logging (not sent to API)
 }
 
 // SendStreamingRequest sends a streaming request to the Kiro API.
@@ -115,10 +116,24 @@ func (c *Client) SendStreamingRequest(ctx context.Context, req *Request) (io.Rea
 		defer func() { _ = resp.Body.Close() }()
 		body, _ := io.ReadAll(resp.Body)
 
-		c.logger.Warn("Kiro API error",
+		// Extract model info from request metadata
+		originalModel := "unknown"
+		kiroModel := "unknown"
+		if req.Metadata != nil {
+			if orig, ok := req.Metadata["original_model"]; ok {
+				originalModel = orig
+			}
+			if kiro, ok := req.Metadata["kiro_model"]; ok {
+				kiroModel = kiro
+			}
+		}
+
+		c.logger.Error("Kiro API error",
 			"status", resp.StatusCode,
+			"profile_arn", req.ProfileARN,
+			"original_model", originalModel,
+			"kiro_model", kiroModel,
 			"response_body", string(body),
-			"request_body", string(req.Body),
 		)
 
 		return nil, &APIError{
@@ -164,6 +179,12 @@ func (e *APIError) IsForbidden() bool {
 	return e.StatusCode == http.StatusForbidden
 }
 
+// IsPaymentRequired returns true if this is a payment required error (402).
+// This typically indicates the account has reached its usage limit.
+func (e *APIError) IsPaymentRequired() bool {
+	return e.StatusCode == http.StatusPaymentRequired
+}
+
 // buildKiroURL builds the Kiro API URL for the given region.
 func buildKiroURL(region string) string {
 	// Default to us-east-1 if region is empty
@@ -202,22 +223,23 @@ type ClaudeTool struct {
 // It converts Claude API messages to Kiro's conversationState format.
 // profileARN is included in the request body for social auth method (required by Kiro API).
 // tools is the array of tool definitions from the Claude API request.
-func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool, system string, profileARN string, tools []byte) ([]byte, error) {
+// Returns the request body and metadata for logging.
+func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool, system string, profileARN string, tools []byte) ([]byte, map[string]string, error) {
 	// Parse Claude messages with full content block support
 	var claudeMessages []struct {
 		Role    string          `json:"role"`
 		Content json.RawMessage `json:"content"`
 	}
 	if err := json.Unmarshal(messages, &claudeMessages); err != nil {
-		return nil, fmt.Errorf("failed to parse messages: %w", err)
+		return nil, nil, fmt.Errorf("failed to parse messages: %w", err)
 	}
 
 	if len(claudeMessages) == 0 {
-		return nil, fmt.Errorf("no messages found")
+		return nil, nil, fmt.Errorf("no messages found")
 	}
 
 	// Map model name to Kiro model ID
-	kiroModel := mapModelToKiro(model)
+	kiroModel, originalModel := mapModelToKiroWithOriginal(model)
 
 	// Step 1: Parse and merge adjacent messages with same role (matching JS implementation)
 	type MergedMessage struct {
@@ -446,7 +468,18 @@ func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool,
 		request["profileArn"] = profileARN
 	}
 
-	return json.Marshal(request)
+	// Prepare metadata for logging (not sent to API)
+	metadata := map[string]string{
+		"original_model": originalModel,
+		"kiro_model":     kiroModel,
+	}
+
+	body, err := json.Marshal(request)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	return body, metadata, nil
 }
 
 // ParsedUserContent holds the parsed components of a user message.
@@ -686,27 +719,40 @@ func extractTextContent(content json.RawMessage) string {
 }
 
 // mapModelToKiro maps Claude model names to Kiro model IDs.
-// Haiku/Opus use lowercase dot format, Sonnet uses uppercase format.
+// Haiku/Opus use standard Claude API format, Sonnet uses Kiro-specific uppercase format.
 func mapModelToKiro(model string) string {
+	kiroModel, _ := mapModelToKiroWithOriginal(model)
+	return kiroModel
+}
+
+// mapModelToKiroWithOriginal maps Claude model names to Kiro model IDs and returns both.
+// Returns (kiroModelID, originalModelName).
+func mapModelToKiroWithOriginal(model string) (string, string) {
 	modelMapping := map[string]string{
-		// Haiku models - lowercase dot format
-		"claude-haiku-4-5":          "claude-haiku-4.5",
-		"claude-haiku-4-5-20251001": "claude-haiku-4.5",
-		// Opus models - lowercase dot format
+		// Opus models - standard Claude API format
 		"claude-opus-4-5":          "claude-opus-4.5",
+		"claude-opus-4.5":          "claude-opus-4.5",
 		"claude-opus-4-5-20251101": "claude-opus-4.5",
-		// Sonnet models - uppercase format
+		// Haiku models - standard Claude API format
+		"claude-haiku-4-5":          "claude-haiku-4.5",
+		"claude-haiku-4.5":          "claude-haiku-4.5",
+		"claude-haiku-4-5-20251001": "claude-haiku-4.5",
+		// Sonnet models - Kiro-specific uppercase format
 		"claude-sonnet-4-5":          "CLAUDE_SONNET_4_5_20250929_V1_0",
+		"claude-sonnet-4.5":          "CLAUDE_SONNET_4_5_20250929_V1_0",
 		"claude-sonnet-4-5-20250929": "CLAUDE_SONNET_4_5_20250929_V1_0",
+		"claude-sonnet-4":            "CLAUDE_SONNET_4_20250514_V1_0",
 		"claude-sonnet-4-20250514":   "CLAUDE_SONNET_4_20250514_V1_0",
 		"claude-3-7-sonnet-20250219": "CLAUDE_3_7_SONNET_20250219_V1_0",
+		// Auto defaults to sonnet 4.5
+		"auto": "claude-sonnet-4.5",
 	}
 
 	if kiroModel, ok := modelMapping[model]; ok {
-		return kiroModel
+		return kiroModel, model
 	}
-	// Default to sonnet if unknown
-	return "CLAUDE_SONNET_4_5_20250929_V1_0"
+	// Default to sonnet 4.5 if unknown
+	return "claude-sonnet-4.5", model
 }
 
 

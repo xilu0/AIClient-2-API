@@ -13,12 +13,14 @@ type Account struct {
 	ProfileARN string `json:"profileArn"` // AWS profile ARN for API calls
 
 	// Health & Usage
-	IsHealthy       bool   `json:"isHealthy"`
-	UsageCount      int64  `json:"usageCount"`
-	ErrorCount      int64  `json:"errorCount"`
-	LastUsed        string `json:"lastUsed"`            // ISO 8601 timestamp
-	LastErrorTime   string `json:"lastErrorTime"`       // ISO 8601 timestamp
-	LastHealthCheck string `json:"lastHealthCheckTime"` // ISO 8601 timestamp
+	IsHealthy             bool   `json:"isHealthy"`
+	IsDisabled            bool   `json:"isDisabled"`                  // Whether account is permanently disabled
+	ScheduledRecoveryTime string `json:"scheduledRecoveryTime,omitempty"` // ISO 8601 timestamp for scheduled recovery (e.g., quota reset)
+	UsageCount            int64  `json:"usageCount"`
+	ErrorCount            int64  `json:"errorCount"`
+	LastUsed              string `json:"lastUsed"`            // ISO 8601 timestamp
+	LastErrorTime         string `json:"lastErrorTime"`       // ISO 8601 timestamp
+	LastHealthCheck       string `json:"lastHealthCheckTime"` // ISO 8601 timestamp
 
 	// Metadata
 	Description string `json:"description,omitempty"`

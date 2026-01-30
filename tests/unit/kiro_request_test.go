@@ -20,7 +20,7 @@ func TestBuildRequestBody_SimpleMessage(t *testing.T) {
 	messagesJSON, err := json.Marshal(messages)
 	require.NoError(t, err)
 
-	body, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -53,7 +53,7 @@ func TestBuildRequestBody_WithSystemPrompt(t *testing.T) {
 	messagesJSON, err := json.Marshal(messages)
 	require.NoError(t, err)
 
-	body, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "You are a math tutor.", "", nil)
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "You are a math tutor.", "", nil)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -106,7 +106,7 @@ func TestBuildRequestBody_WithToolResult(t *testing.T) {
 	messagesJSON, err := json.Marshal(messages)
 	require.NoError(t, err)
 
-	body, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "profile-arn-123", nil)
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "profile-arn-123", nil)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -158,7 +158,7 @@ func TestBuildRequestBody_WithToolUseInAssistant(t *testing.T) {
 	messagesJSON, err := json.Marshal(messages)
 	require.NoError(t, err)
 
-	body, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -216,7 +216,7 @@ func TestBuildRequestBody_WithImage(t *testing.T) {
 	messagesJSON, err := json.Marshal(messages)
 	require.NoError(t, err)
 
-	body, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -271,7 +271,7 @@ func TestBuildRequestBody_EmptyContentWithToolResult(t *testing.T) {
 	messagesJSON, err := json.Marshal(messages)
 	require.NoError(t, err)
 
-	body, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -318,7 +318,7 @@ func TestBuildRequestBody_DuplicateToolResultIds(t *testing.T) {
 	messagesJSON, err := json.Marshal(messages)
 	require.NoError(t, err)
 
-	body, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -371,7 +371,7 @@ func TestBuildRequestBody_ThinkingContent(t *testing.T) {
 	messagesJSON, err := json.Marshal(messages)
 	require.NoError(t, err)
 
-	body, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -421,7 +421,7 @@ func TestBuildRequestBody_HistoryEndsWithAssistant(t *testing.T) {
 	messagesJSON, err := json.Marshal(messages)
 	require.NoError(t, err)
 
-	body, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -445,11 +445,23 @@ func TestBuildRequestBody_ModelMapping(t *testing.T) {
 		inputModel    string
 		expectedModel string
 	}{
+		// Sonnet models - Kiro-specific uppercase format
 		{"claude-sonnet-4-5-20250929", "CLAUDE_SONNET_4_5_20250929_V1_0"},
 		{"claude-sonnet-4-5", "CLAUDE_SONNET_4_5_20250929_V1_0"},
+		{"claude-sonnet-4", "CLAUDE_SONNET_4_20250514_V1_0"},
+		{"claude-sonnet-4-20250514", "CLAUDE_SONNET_4_20250514_V1_0"},
+		{"claude-3-7-sonnet-20250219", "CLAUDE_3_7_SONNET_20250219_V1_0"},
+		// Haiku models - standard Claude API format
 		{"claude-haiku-4-5", "claude-haiku-4.5"},
+		{"claude-haiku-4.5", "claude-haiku-4.5"},
+		{"claude-haiku-4-5-20251001", "claude-haiku-4.5"},
+		// Opus models - standard Claude API format
 		{"claude-opus-4-5", "claude-opus-4.5"},
-		{"unknown-model", "CLAUDE_SONNET_4_5_20250929_V1_0"}, // Default
+		{"claude-opus-4.5", "claude-opus-4.5"},
+		{"claude-opus-4-5-20251101", "claude-opus-4.5"},
+		// Auto and unknown
+		{"auto", "claude-sonnet-4.5"},
+		{"unknown-model", "claude-sonnet-4.5"}, // Default
 	}
 
 	for _, tt := range tests {
@@ -459,7 +471,7 @@ func TestBuildRequestBody_ModelMapping(t *testing.T) {
 			}
 			messagesJSON, _ := json.Marshal(messages)
 
-			body, err := kiro.BuildRequestBody(tt.inputModel, messagesJSON, 1000, true, "", "", nil)
+			body, _, err := kiro.BuildRequestBody(tt.inputModel, messagesJSON, 1000, true, "", "", nil)
 			require.NoError(t, err)
 
 			var req map[string]interface{}
@@ -513,7 +525,7 @@ func TestBuildRequestBody_WithTools(t *testing.T) {
 	toolsJSON, err := json.Marshal(tools)
 	require.NoError(t, err)
 
-	body, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", toolsJSON)
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", toolsJSON)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -578,7 +590,7 @@ func TestBuildRequestBody_WithToolsFiltersWebSearch(t *testing.T) {
 	toolsJSON, err := json.Marshal(tools)
 	require.NoError(t, err)
 
-	body, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", toolsJSON)
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", toolsJSON)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -630,7 +642,7 @@ func TestBuildRequestBody_DuplicateToolResultIdsInHistory(t *testing.T) {
 	messagesJSON, err := json.Marshal(messages)
 	require.NoError(t, err)
 
-	body, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -677,7 +689,7 @@ func TestBuildRequestBody_ToolResultStatusAlwaysSuccess(t *testing.T) {
 	messagesJSON, err := json.Marshal(messages)
 	require.NoError(t, err)
 
-	body, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -743,7 +755,7 @@ func TestBuildRequestBody_WithToolResultsAndTools(t *testing.T) {
 	toolsJSON, err := json.Marshal(tools)
 	require.NoError(t, err)
 
-	body, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", toolsJSON)
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", toolsJSON)
 	require.NoError(t, err)
 
 	var req map[string]interface{}

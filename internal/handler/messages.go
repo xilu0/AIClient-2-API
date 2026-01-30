@@ -195,7 +195,7 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 		// Build request body - include profileARN for social auth method and tools
 		messagesJSON, _ := json.Marshal(req.Messages)
 		toolsJSON, _ := json.Marshal(req.Tools)
-		reqBody, err := kiro.BuildRequestBody(req.Model, messagesJSON, req.MaxTokens, true, req.GetSystemString(), acc.ProfileARN, toolsJSON)
+		reqBody, metadata, err := kiro.BuildRequestBody(req.Model, messagesJSON, req.MaxTokens, true, req.GetSystemString(), acc.ProfileARN, toolsJSON)
 		if err != nil {
 			h.writeError(w, claude.NewAPIError("Failed to build request"))
 			return
@@ -213,12 +213,25 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 			ProfileARN: acc.ProfileARN,
 			Token:      token.AccessToken,
 			Body:       reqBody,
+			Metadata:   metadata,
 		}
 
 		body, err := h.kiroClient.SendStreamingRequest(ctx, kiroReq)
 		if err != nil {
 			var apiErr *kiro.APIError
 			if errors.As(err, &apiErr) {
+				if apiErr.IsPaymentRequired() {
+					// 402 Payment Required - quota exhausted, set recovery time to next month
+					nextMonth := getNextMonthFirstDay()
+					_ = h.poolManager.MarkUnhealthyWithRecovery(ctx, acc.UUID, nextMonth)
+					excluded[acc.UUID] = true
+					lastErr = err
+					h.logger.Warn("Account quota exhausted, recovery scheduled",
+						"uuid", acc.UUID,
+						"profile_arn", acc.ProfileARN,
+						"recovery_time", nextMonth.Format(time.RFC3339))
+					continue
+				}
 				if apiErr.IsRateLimited() || apiErr.IsForbidden() {
 					// Mark account unhealthy and retry
 					_ = h.poolManager.MarkUnhealthy(ctx, acc.UUID)
@@ -227,7 +240,7 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 					continue
 				}
 			}
-			h.logger.Error("Kiro API error", "error", err)
+			h.logger.Error("Kiro API error", "error", err, "uuid", acc.UUID, "profile_arn", acc.ProfileARN)
 			_ = sseWriter.WriteError(claude.NewAPIError("Upstream error"))
 			return
 		}
@@ -416,7 +429,7 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 		// Include profileARN for social auth method and tools
 		messagesJSON, _ := json.Marshal(req.Messages)
 		toolsJSON, _ := json.Marshal(req.Tools)
-		reqBody, err := kiro.BuildRequestBody(req.Model, messagesJSON, req.MaxTokens, true, req.GetSystemString(), acc.ProfileARN, toolsJSON)
+		reqBody, metadata, err := kiro.BuildRequestBody(req.Model, messagesJSON, req.MaxTokens, true, req.GetSystemString(), acc.ProfileARN, toolsJSON)
 		if err != nil {
 			h.writeError(w, claude.NewAPIError("Failed to build request"))
 			return
@@ -434,12 +447,25 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 			ProfileARN: acc.ProfileARN,
 			Token:      token.AccessToken,
 			Body:       reqBody,
+			Metadata:   metadata,
 		}
 
 		body, err := h.kiroClient.SendStreamingRequest(ctx, kiroReq)
 		if err != nil {
 			var apiErr *kiro.APIError
 			if errors.As(err, &apiErr) {
+				if apiErr.IsPaymentRequired() {
+					// 402 Payment Required - quota exhausted, set recovery time to next month
+					nextMonth := getNextMonthFirstDay()
+					_ = h.poolManager.MarkUnhealthyWithRecovery(ctx, acc.UUID, nextMonth)
+					excluded[acc.UUID] = true
+					lastErr = err
+					h.logger.Warn("Account quota exhausted, recovery scheduled",
+						"uuid", acc.UUID,
+						"profile_arn", acc.ProfileARN,
+						"recovery_time", nextMonth.Format(time.RFC3339))
+					continue
+				}
 				if apiErr.IsRateLimited() || apiErr.IsForbidden() {
 					// Mark account unhealthy and retry
 					_ = h.poolManager.MarkUnhealthy(ctx, acc.UUID)
@@ -448,7 +474,7 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 					continue
 				}
 			}
-			h.logger.Error("Kiro API error", "error", err)
+			h.logger.Error("Kiro API error", "error", err, "uuid", acc.UUID, "profile_arn", acc.ProfileARN)
 			h.writeError(w, claude.NewAPIError("Upstream error"))
 			return
 		}
@@ -601,4 +627,20 @@ func (h *MessagesHandler) refreshToken(ctx context.Context, acc *redis.Account, 
 
 	h.logger.Info("token refreshed successfully", "uuid", acc.UUID, "expires_at", expiresAt)
 	return newToken, nil
+}
+
+// getNextMonthFirstDay returns the first day of next month at 00:00:00 UTC.
+// Used for scheduling recovery time for quota exhaustion (402 errors).
+// Matches Node.js implementation: _getNextMonthFirstDay.
+func getNextMonthFirstDay() time.Time {
+	now := time.Now().UTC()
+	year, month, _ := now.Date()
+	// Add one month
+	nextMonth := month + 1
+	nextYear := year
+	if nextMonth > 12 {
+		nextMonth = 1
+		nextYear++
+	}
+	return time.Date(nextYear, nextMonth, 1, 0, 0, 0, 0, time.UTC)
 }

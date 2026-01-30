@@ -135,6 +135,33 @@ func (pm *PoolManager) MarkHealthy(ctx context.Context, uuid string) error {
 	})
 }
 
+// MarkDisabled marks an account as permanently disabled.
+// Disabled accounts will not be selected even after cooldown period.
+func (pm *PoolManager) MarkDisabled(ctx context.Context, uuid string) error {
+	return pm.updateAccountField(ctx, uuid, func(acc *Account) {
+		acc.IsDisabled = true
+		acc.IsHealthy = false
+	})
+}
+
+// MarkEnabled marks an account as enabled (removes disabled flag).
+func (pm *PoolManager) MarkEnabled(ctx context.Context, uuid string) error {
+	return pm.updateAccountField(ctx, uuid, func(acc *Account) {
+		acc.IsDisabled = false
+	})
+}
+
+// MarkUnhealthyWithRecovery marks an account as unhealthy with a scheduled recovery time.
+// Used for quota exhaustion (402) where quota resets at a specific time (e.g., 1st of next month).
+// Matches Node.js implementation: markProviderUnhealthyWithRecoveryTime.
+func (pm *PoolManager) MarkUnhealthyWithRecovery(ctx context.Context, uuid string, recoveryTime time.Time) error {
+	return pm.updateAccountField(ctx, uuid, func(acc *Account) {
+		acc.IsHealthy = false
+		acc.ScheduledRecoveryTime = recoveryTime.Format(time.RFC3339)
+		acc.LastErrorTime = time.Now().Format(time.RFC3339)
+	})
+}
+
 // RecordSuccessAtomic atomically marks an account as healthy and increments usage.
 // This combines two operations into one Redis transaction, reducing round-trips and contention.
 func (pm *PoolManager) RecordSuccessAtomic(ctx context.Context, uuid string) error {

@@ -171,7 +171,24 @@ func (s *Selector) filterHealthyAccounts(accounts []redis.Account) []redis.Accou
 	now := time.Now()
 
 	for _, acc := range accounts {
+		// Skip disabled accounts
+		if acc.IsDisabled {
+			continue
+		}
+
 		if acc.IsHealthy {
+			healthy = append(healthy, acc)
+			continue
+		}
+
+		// Check if account has scheduled recovery time (e.g., quota reset)
+		if acc.ScheduledRecoveryTime != "" {
+			recoveryTime, err := time.Parse(time.RFC3339, acc.ScheduledRecoveryTime)
+			if err == nil && now.Before(recoveryTime) {
+				// Still before recovery time, skip this account
+				continue
+			}
+			// Recovery time has passed, account is eligible for retry
 			healthy = append(healthy, acc)
 			continue
 		}

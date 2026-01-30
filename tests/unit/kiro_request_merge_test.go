@@ -24,7 +24,7 @@ func TestBuildRequestBody_MergeAdjacentUserMessages(t *testing.T) {
 	messagesJSON, err := json.Marshal(messages)
 	require.NoError(t, err)
 
-	body, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -107,7 +107,7 @@ func TestBuildRequestBody_MergeAdjacentToolResults(t *testing.T) {
 	messagesJSON, err := json.Marshal(messages)
 	require.NoError(t, err)
 
-	body, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -157,7 +157,7 @@ func TestBuildRequestBody_MergeWithSystemPrompt(t *testing.T) {
 	messagesJSON, err := json.Marshal(messages)
 	require.NoError(t, err)
 
-	body, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "System Prompt", "", nil)
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "System Prompt", "", nil)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -200,7 +200,7 @@ func TestBuildRequestBody_EmptyContentFallback(t *testing.T) {
 	messagesJSON, err := json.Marshal(messages)
 	require.NoError(t, err)
 
-	body, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
