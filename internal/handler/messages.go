@@ -271,6 +271,15 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 
 	// All retries failed
 	h.logger.Error("all retries failed", "error", lastErr)
+
+	// Return appropriate error based on the last error type
+	var apiErr *kiro.APIError
+	if errors.As(lastErr, &apiErr) {
+		if apiErr.IsOverloaded() {
+			_ = sseWriter.WriteError(claude.NewOverloadedError("Service is overloaded, please retry later"))
+			return
+		}
+	}
 	_ = sseWriter.WriteError(claude.NewAPIError("All accounts failed"))
 }
 
@@ -530,6 +539,15 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 
 	// All retries failed
 	h.logger.Error("all retries failed", "error", lastErr)
+
+	// Return appropriate error based on the last error type
+	var apiErr *kiro.APIError
+	if errors.As(lastErr, &apiErr) {
+		if apiErr.IsOverloaded() {
+			h.writeError(w, claude.NewOverloadedError("Service is overloaded, please retry later"))
+			return
+		}
+	}
 	h.writeError(w, claude.NewAPIError("All accounts failed"))
 }
 

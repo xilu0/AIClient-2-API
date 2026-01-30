@@ -186,9 +186,16 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("Kiro API error: status %d, body: %s", e.StatusCode, string(e.Body))
 }
 
-// IsRateLimited returns true if this is a rate limit error (429).
+// IsRateLimited returns true if this is a rate limit error (429 or 529).
+// 529 is a Kiro-specific overloaded error code.
 func (e *APIError) IsRateLimited() bool {
-	return e.StatusCode == http.StatusTooManyRequests
+	return e.StatusCode == http.StatusTooManyRequests || e.StatusCode == 529
+}
+
+// IsOverloaded returns true if this is an overloaded error (529).
+// This is a Kiro-specific error code indicating the service is overloaded.
+func (e *APIError) IsOverloaded() bool {
+	return e.StatusCode == 529
 }
 
 // IsForbidden returns true if this is an authorization error (403).
