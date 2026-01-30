@@ -239,6 +239,19 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 					lastErr = err
 					continue
 				}
+				if apiErr.IsBadRequest() {
+					// 400 Bad Request - likely model not supported by this account
+					// Mark account unhealthy and retry with another account
+					_ = h.poolManager.MarkUnhealthy(ctx, acc.UUID)
+					excluded[acc.UUID] = true
+					lastErr = err
+					h.logger.Warn("Account returned 400, may not support this model",
+						"uuid", acc.UUID,
+						"profile_arn", acc.ProfileARN,
+						"model", req.Model,
+						"region", acc.Region)
+					continue
+				}
 			}
 			h.logger.Error("Kiro API error", "error", err, "uuid", acc.UUID, "profile_arn", acc.ProfileARN)
 			_ = sseWriter.WriteError(claude.NewAPIError("Upstream error"))
@@ -471,6 +484,19 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 					_ = h.poolManager.MarkUnhealthy(ctx, acc.UUID)
 					excluded[acc.UUID] = true
 					lastErr = err
+					continue
+				}
+				if apiErr.IsBadRequest() {
+					// 400 Bad Request - likely model not supported by this account
+					// Mark account unhealthy and retry with another account
+					_ = h.poolManager.MarkUnhealthy(ctx, acc.UUID)
+					excluded[acc.UUID] = true
+					lastErr = err
+					h.logger.Warn("Account returned 400, may not support this model",
+						"uuid", acc.UUID,
+						"profile_arn", acc.ProfileARN,
+						"model", req.Model,
+						"region", acc.Region)
 					continue
 				}
 			}

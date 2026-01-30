@@ -451,17 +451,17 @@ func TestBuildRequestBody_ModelMapping(t *testing.T) {
 		{"claude-sonnet-4", "CLAUDE_SONNET_4_20250514_V1_0"},
 		{"claude-sonnet-4-20250514", "CLAUDE_SONNET_4_20250514_V1_0"},
 		{"claude-3-7-sonnet-20250219", "CLAUDE_3_7_SONNET_20250219_V1_0"},
-		// Haiku models - standard Claude API format
-		{"claude-haiku-4-5", "claude-haiku-4.5"},
-		{"claude-haiku-4.5", "claude-haiku-4.5"},
-		{"claude-haiku-4-5-20251001", "claude-haiku-4.5"},
-		// Opus models - standard Claude API format
-		{"claude-opus-4-5", "claude-opus-4.5"},
-		{"claude-opus-4.5", "claude-opus-4.5"},
-		{"claude-opus-4-5-20251101", "claude-opus-4.5"},
+		// Haiku models - Kiro-specific uppercase format
+		{"claude-haiku-4-5", "CLAUDE_HAIKU_4_5_20251001_V1_0"},
+		{"claude-haiku-4.5", "CLAUDE_HAIKU_4_5_20251001_V1_0"},
+		{"claude-haiku-4-5-20251001", "CLAUDE_HAIKU_4_5_20251001_V1_0"},
+		// Opus models - Kiro-specific uppercase format
+		{"claude-opus-4-5", "CLAUDE_OPUS_4_5_20251101_V1_0"},
+		{"claude-opus-4.5", "CLAUDE_OPUS_4_5_20251101_V1_0"},
+		{"claude-opus-4-5-20251101", "CLAUDE_OPUS_4_5_20251101_V1_0"},
 		// Auto and unknown
-		{"auto", "claude-sonnet-4.5"},
-		{"unknown-model", "claude-sonnet-4.5"}, // Default
+		{"auto", "CLAUDE_SONNET_4_5_20250929_V1_0"},
+		{"unknown-model", "CLAUDE_SONNET_4_5_20250929_V1_0"}, // Default
 	}
 
 	for _, tt := range tests {

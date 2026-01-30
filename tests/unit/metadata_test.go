@@ -53,19 +53,19 @@ func TestMetadataForDifferentModels(t *testing.T) {
 			name:         "Haiku 4.5",
 			inputModel:   "claude-haiku-4-5",
 			expectedOrig: "claude-haiku-4-5",
-			expectedKiro: "claude-haiku-4.5",
+			expectedKiro: "CLAUDE_HAIKU_4_5_20251001_V1_0",
 		},
 		{
 			name:         "Opus 4.5",
 			inputModel:   "claude-opus-4-5",
 			expectedOrig: "claude-opus-4-5",
-			expectedKiro: "claude-opus-4.5",
+			expectedKiro: "CLAUDE_OPUS_4_5_20251101_V1_0",
 		},
 		{
 			name:         "Unknown model",
 			inputModel:   "unknown-model",
 			expectedOrig: "unknown-model",
-			expectedKiro: "claude-sonnet-4.5",
+			expectedKiro: "CLAUDE_SONNET_4_5_20250929_V1_0",
 		},
 	}
 

@@ -202,6 +202,12 @@ func (e *APIError) IsPaymentRequired() bool {
 	return e.StatusCode == http.StatusPaymentRequired
 }
 
+// IsBadRequest returns true if this is a bad request error (400).
+// This typically indicates the request format is invalid or the model is not supported.
+func (e *APIError) IsBadRequest() bool {
+	return e.StatusCode == http.StatusBadRequest
+}
+
 // buildKiroURL builds the Kiro API URL for the given region.
 func buildKiroURL(region string) string {
 	// Default to us-east-1 if region is empty
@@ -746,14 +752,14 @@ func mapModelToKiro(model string) string {
 // Returns (kiroModelID, originalModelName).
 func mapModelToKiroWithOriginal(model string) (string, string) {
 	modelMapping := map[string]string{
-		// Opus models - standard Claude API format
-		"claude-opus-4-5":          "claude-opus-4.5",
-		"claude-opus-4.5":          "claude-opus-4.5",
-		"claude-opus-4-5-20251101": "claude-opus-4.5",
-		// Haiku models - standard Claude API format
-		"claude-haiku-4-5":          "claude-haiku-4.5",
-		"claude-haiku-4.5":          "claude-haiku-4.5",
-		"claude-haiku-4-5-20251001": "claude-haiku-4.5",
+		// Opus models - Kiro-specific uppercase format (same as Sonnet)
+		"claude-opus-4-5":          "CLAUDE_OPUS_4_5_20251101_V1_0",
+		"claude-opus-4.5":          "CLAUDE_OPUS_4_5_20251101_V1_0",
+		"claude-opus-4-5-20251101": "CLAUDE_OPUS_4_5_20251101_V1_0",
+		// Haiku models - Kiro-specific uppercase format
+		"claude-haiku-4-5":          "CLAUDE_HAIKU_4_5_20251001_V1_0",
+		"claude-haiku-4.5":          "CLAUDE_HAIKU_4_5_20251001_V1_0",
+		"claude-haiku-4-5-20251001": "CLAUDE_HAIKU_4_5_20251001_V1_0",
 		// Sonnet models - Kiro-specific uppercase format
 		"claude-sonnet-4-5":          "CLAUDE_SONNET_4_5_20250929_V1_0",
 		"claude-sonnet-4.5":          "CLAUDE_SONNET_4_5_20250929_V1_0",
@@ -762,14 +768,14 @@ func mapModelToKiroWithOriginal(model string) (string, string) {
 		"claude-sonnet-4-20250514":   "CLAUDE_SONNET_4_20250514_V1_0",
 		"claude-3-7-sonnet-20250219": "CLAUDE_3_7_SONNET_20250219_V1_0",
 		// Auto defaults to sonnet 4.5
-		"auto": "claude-sonnet-4.5",
+		"auto": "CLAUDE_SONNET_4_5_20250929_V1_0",
 	}
 
 	if kiroModel, ok := modelMapping[model]; ok {
 		return kiroModel, model
 	}
-	// Default to sonnet 4.5 if unknown
-	return "claude-sonnet-4.5", model
+	// Default to sonnet 4.5 if unknown (use uppercase format)
+	return "CLAUDE_SONNET_4_5_20250929_V1_0", model
 }
 
 
