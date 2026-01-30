@@ -157,6 +157,8 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 	// Try to get a working account with retries
 	excluded := make(map[string]bool)
 	var lastErr error
+	var lastAccountUUID string    // Track the last account UUID for error reporting
+	var triedAccounts []string    // Track all tried accounts for debugging
 
 	for attempt := 0; attempt < h.maxRetries; attempt++ {
 		// Select account
@@ -169,6 +171,10 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 			lastErr = err
 			continue
 		}
+
+		// Track this account for error reporting
+		lastAccountUUID = acc.UUID
+		triedAccounts = append(triedAccounts, acc.UUID)
 
 		// Get token
 		token, err := h.tokenManager.GetToken(ctx, acc.UUID)
@@ -269,18 +275,24 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 		return
 	}
 
-	// All retries failed
-	h.logger.Error("all retries failed", "error", lastErr)
+	// All retries failed - pass through the original error for debugging
+	h.logger.Error("all retries failed", "error", lastErr, "tried_accounts", triedAccounts)
 
-	// Return appropriate error based on the last error type
+	// Return appropriate error based on the last error type, preserving original message
 	var apiErr *kiro.APIError
 	if errors.As(lastErr, &apiErr) {
 		if apiErr.IsOverloaded() {
-			_ = sseWriter.WriteError(claude.NewOverloadedError("Service is overloaded, please retry later"))
+			_ = sseWriter.WriteError(claude.NewOverloadedError(fmt.Sprintf("Service overloaded (account: %s): %s", lastAccountUUID, string(apiErr.Body))))
 			return
 		}
+		// Pass through the original error message from Kiro API with account info
+		_ = sseWriter.WriteError(claude.NewAPIErrorWithStatus(
+			fmt.Sprintf("Upstream error (account: %s, status %d): %s", lastAccountUUID, apiErr.StatusCode, string(apiErr.Body)),
+			apiErr.StatusCode,
+		))
+		return
 	}
-	_ = sseWriter.WriteError(claude.NewAPIError("All accounts failed"))
+	_ = sseWriter.WriteError(claude.NewAPIError(fmt.Sprintf("All accounts failed (tried: %v): %v", triedAccounts, lastErr)))
 }
 
 // streamResponse reads from Kiro and writes SSE events.
@@ -412,6 +424,8 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 	// Try to get a working account with retries
 	excluded := make(map[string]bool)
 	var lastErr error
+	var lastAccountUUID string    // Track the last account UUID for error reporting
+	var triedAccounts []string    // Track all tried accounts for debugging
 
 	for attempt := 0; attempt < h.maxRetries; attempt++ {
 		// Select account
@@ -424,6 +438,10 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 			lastErr = err
 			continue
 		}
+
+		// Track this account for error reporting
+		lastAccountUUID = acc.UUID
+		triedAccounts = append(triedAccounts, acc.UUID)
 
 		// Get token
 		token, err := h.tokenManager.GetToken(ctx, acc.UUID)
@@ -538,17 +556,23 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 	}
 
 	// All retries failed
-	h.logger.Error("all retries failed", "error", lastErr)
+	h.logger.Error("all retries failed", "error", lastErr, "tried_accounts", triedAccounts)
 
 	// Return appropriate error based on the last error type
 	var apiErr *kiro.APIError
 	if errors.As(lastErr, &apiErr) {
 		if apiErr.IsOverloaded() {
-			h.writeError(w, claude.NewOverloadedError("Service is overloaded, please retry later"))
+			h.writeError(w, claude.NewOverloadedError(fmt.Sprintf("Service overloaded (account: %s): %s", lastAccountUUID, string(apiErr.Body))))
 			return
 		}
+		// Pass through the original error message from Kiro API with account info
+		h.writeError(w, claude.NewAPIErrorWithStatus(
+			fmt.Sprintf("Upstream error (account: %s, status %d): %s", lastAccountUUID, apiErr.StatusCode, string(apiErr.Body)),
+			apiErr.StatusCode,
+		))
+		return
 	}
-	h.writeError(w, claude.NewAPIError("All accounts failed"))
+	h.writeError(w, claude.NewAPIError(fmt.Sprintf("All accounts failed (tried: %v): %v", triedAccounts, lastErr)))
 }
 
 // aggregateResponse reads all chunks and builds a complete response.

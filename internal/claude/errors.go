@@ -132,5 +132,15 @@ func NewOverloadedError(message string) *APIError {
 	}
 }
 
+// NewAPIErrorWithStatus creates an API error with a custom status code.
+// Used for passing through upstream error status codes.
+func NewAPIErrorWithStatus(message string, statusCode int) *APIError {
+	return &APIError{
+		Type:       ErrorTypeAPI,
+		Message:    message,
+		StatusCode: statusCode,
+	}
+}
+
 // ErrNoHealthyAccounts is returned when no healthy accounts are available.
 var ErrNoHealthyAccounts = NewOverloadedError("No healthy accounts available")
