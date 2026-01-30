@@ -102,7 +102,8 @@ func (c *Client) SendStreamingRequest(ctx context.Context, req *Request) (io.Rea
 		"url", url,
 		"profile_arn", req.ProfileARN,
 		"invocation_id", invocationID,
-		"request_body", string(req.Body),
+		"original_model", req.Metadata["original_model"],
+		"kiro_model", req.Metadata["kiro_model"],
 	)
 
 	// Send request
@@ -128,11 +129,27 @@ func (c *Client) SendStreamingRequest(ctx context.Context, req *Request) (io.Rea
 			}
 		}
 
+		// Extract modelId from request body for debugging
+		var reqBody map[string]interface{}
+		modelIdInRequest := "unknown"
+		if err := json.Unmarshal(req.Body, &reqBody); err == nil {
+			if convState, ok := reqBody["conversationState"].(map[string]interface{}); ok {
+				if currentMsg, ok := convState["currentMessage"].(map[string]interface{}); ok {
+					if userInput, ok := currentMsg["userInputMessage"].(map[string]interface{}); ok {
+						if modelId, ok := userInput["modelId"].(string); ok {
+							modelIdInRequest = modelId
+						}
+					}
+				}
+			}
+		}
+
 		c.logger.Error("Kiro API error",
 			"status", resp.StatusCode,
 			"profile_arn", req.ProfileARN,
 			"original_model", originalModel,
 			"kiro_model", kiroModel,
+			"model_id_in_request", modelIdInRequest,
 			"response_body", string(body),
 		)
 
