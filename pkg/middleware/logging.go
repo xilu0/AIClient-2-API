@@ -6,16 +6,12 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
-
-	"github.com/anthropics/AIClient-2-API/internal/claude"
 )
 
 // contextKey is a type for context keys to avoid collisions.
 type contextKey string
 
 const (
-	// RequestIDKey is the context key for request ID.
-	RequestIDKey contextKey = "request_id"
 	// StartTimeKey is the context key for request start time.
 	StartTimeKey contextKey = "start_time"
 )
@@ -61,11 +57,9 @@ func Logging(logger *slog.Logger) func(http.Handler) http.Handler {
 			}
 
 			start := time.Now()
-			requestID := generateRequestID()
 
-			// Add request info to context
-			ctx := context.WithValue(r.Context(), RequestIDKey, requestID)
-			ctx = context.WithValue(ctx, StartTimeKey, start)
+			// Add start time to context for duration calculation
+			ctx := context.WithValue(r.Context(), StartTimeKey, start)
 			r = r.WithContext(ctx)
 
 			// Wrap response writer
@@ -74,20 +68,10 @@ func Logging(logger *slog.Logger) func(http.Handler) http.Handler {
 				status:         http.StatusOK,
 			}
 
-			// Log request start
-			logger.Info("request started",
-				"request_id", requestID,
-				"method", r.Method,
-				"path", r.URL.Path,
-				"remote_addr", r.RemoteAddr,
-				"user_agent", r.UserAgent(),
-			)
-
 			// Serve request
 			next.ServeHTTP(wrapped, r)
 
-			// Log request completion
-			// Skip for /v1/messages - handler logs completion with usage info
+			// Log request completion (skip for /v1/messages - handler logs with usage info)
 			if r.URL.Path != "/v1/messages" {
 				duration := time.Since(start)
 				logger.Info("request completed",
@@ -99,19 +83,6 @@ func Logging(logger *slog.Logger) func(http.Handler) http.Handler {
 			}
 		})
 	}
-}
-
-// generateRequestID generates a unique request ID.
-func generateRequestID() string {
-	return claude.GenerateMessageID()
-}
-
-// GetRequestID retrieves the request ID from context.
-func GetRequestID(ctx context.Context) string {
-	if id, ok := ctx.Value(RequestIDKey).(string); ok {
-		return id
-	}
-	return ""
 }
 
 // GetStartTime retrieves the request start time from context.
