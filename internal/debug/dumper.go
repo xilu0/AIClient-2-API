@@ -17,9 +17,12 @@ const (
 )
 
 // Dumper handles request/response dumping for debugging.
+// Directory structure:
+//   - {baseDir}/success/{sessionID}/ - successful requests (only when GO_KIRO_DEBUG_DUMP=true)
+//   - {baseDir}/errors/{sessionID}/  - failed requests (always enabled unless GO_KIRO_ERROR_DUMP=false)
 type Dumper struct {
-	enabled         bool
-	errorDumpAlways bool // Always dump on errors, even if debug is disabled
+	enabled         bool // Full debug mode: save all requests (success + errors)
+	errorDumpAlways bool // Error-only mode: save only errors (default: true)
 	baseDir         string
 	mu              sync.Mutex
 }
@@ -36,22 +39,26 @@ type Metadata struct {
 	Error         string    `json:"error,omitempty"`
 	ErrorType     string    `json:"error_type,omitempty"`
 	TriedAccounts []string  `json:"tried_accounts,omitempty"`
+	Success       bool      `json:"success"`
 }
 
 // Session represents a debug session for a single request.
 type Session struct {
-	dumper      *Dumper
-	sessionID   string
-	dir         string
-	metadata    *Metadata
-	mu          sync.Mutex
-	closed      bool
-	isErrorDump bool // If true, this is an error-only dump session
+	dumper    *Dumper
+	sessionID string
+	dir       string
+	metadata  *Metadata
+	mu        sync.Mutex
+	closed    bool
 }
 
 // NewDumper creates a new debug dumper.
-// Enable full debug with GO_KIRO_DEBUG_DUMP=true environment variable.
-// Error dumps are always enabled by default (disable with GO_KIRO_ERROR_DUMP=false).
+//
+// Environment variables:
+//   - GO_KIRO_DEBUG_DUMP=true: Enable full debug mode (save all requests to success/ and errors/)
+//   - GO_KIRO_DEBUG_DUMP=false (default): Only save error requests to errors/
+//   - GO_KIRO_ERROR_DUMP=false: Disable error dumping entirely
+//   - GO_KIRO_DEBUG_DIR: Custom base directory (default: /tmp/kiro-debug)
 func NewDumper() *Dumper {
 	enabled := os.Getenv("GO_KIRO_DEBUG_DUMP") == "true"
 	errorDumpAlways := os.Getenv("GO_KIRO_ERROR_DUMP") != "false" // Default to true
@@ -61,8 +68,9 @@ func NewDumper() *Dumper {
 	}
 
 	if enabled || errorDumpAlways {
-		// Ensure base directory exists
-		_ = os.MkdirAll(baseDir, 0755)
+		// Ensure base directories exist
+		_ = os.MkdirAll(filepath.Join(baseDir, "success"), 0755)
+		_ = os.MkdirAll(filepath.Join(baseDir, "errors"), 0755)
 	}
 
 	return &Dumper{
@@ -83,13 +91,15 @@ func (d *Dumper) ErrorDumpEnabled() bool {
 }
 
 // NewSession creates a new debug session.
-// Returns nil if dumping is disabled.
+// Returns nil if both full debug and error dump are disabled.
+// The session initially writes to a temp directory, then moves to success/ or errors/ on completion.
 func (d *Dumper) NewSession(sessionID string) *Session {
-	if !d.enabled {
+	if !d.enabled && !d.errorDumpAlways {
 		return nil
 	}
 
-	dir := filepath.Join(d.baseDir, sessionID)
+	// Use temp directory during request processing
+	dir := filepath.Join(d.baseDir, "temp", sessionID)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil
 	}
@@ -98,30 +108,6 @@ func (d *Dumper) NewSession(sessionID string) *Session {
 		dumper:    d,
 		sessionID: sessionID,
 		dir:       dir,
-		metadata: &Metadata{
-			SessionID: sessionID,
-			StartTime: time.Now(),
-		},
-	}
-}
-
-// NewErrorSession creates a session specifically for error dumping.
-// This works even when full debug is disabled, as long as error dumping is enabled.
-func (d *Dumper) NewErrorSession(sessionID string) *Session {
-	if !d.enabled && !d.errorDumpAlways {
-		return nil
-	}
-
-	dir := filepath.Join(d.baseDir, "errors", sessionID)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return nil
-	}
-
-	return &Session{
-		dumper:       d,
-		sessionID:    sessionID,
-		dir:          dir,
-		isErrorDump:  true,
 		metadata: &Metadata{
 			SessionID: sessionID,
 			StartTime: time.Now(),
@@ -300,7 +286,9 @@ func (s *Session) writeFile(name string, data []byte) {
 	_ = os.WriteFile(path, data, 0644)
 }
 
-// Success marks the session as successful and cleans up.
+// Success marks the session as successful.
+// If full debug is enabled, moves files to success/ directory.
+// If only error dump is enabled, removes the temp directory.
 func (s *Session) Success() {
 	if s == nil {
 		return
@@ -313,11 +301,22 @@ func (s *Session) Success() {
 	}
 	s.closed = true
 
-	// Remove the debug directory on success
-	_ = os.RemoveAll(s.dir)
+	// Update metadata
+	s.metadata.EndTime = time.Now()
+	s.metadata.Success = true
+
+	if s.dumper.enabled {
+		// Full debug mode: move to success/ directory
+		s.writeMetadata()
+		destDir := filepath.Join(s.dumper.baseDir, "success", s.sessionID)
+		_ = os.Rename(s.dir, destDir)
+	} else {
+		// Error-only mode: remove temp directory
+		_ = os.RemoveAll(s.dir)
+	}
 }
 
-// Fail marks the session as failed and writes metadata.
+// Fail marks the session as failed and moves files to errors/ directory.
 func (s *Session) Fail(err error) {
 	if s == nil {
 		return
@@ -332,11 +331,19 @@ func (s *Session) Fail(err error) {
 
 	// Update metadata
 	s.metadata.EndTime = time.Now()
+	s.metadata.Success = false
 	if err != nil {
 		s.metadata.Error = err.Error()
 	}
 
-	// Write metadata file
+	// Write metadata and move to errors/ directory
+	s.writeMetadata()
+	destDir := filepath.Join(s.dumper.baseDir, "errors", s.sessionID)
+	_ = os.Rename(s.dir, destDir)
+}
+
+// writeMetadata writes the metadata.json file (must be called with lock held).
+func (s *Session) writeMetadata() {
 	data, _ := json.MarshalIndent(s.metadata, "", "  ")
 	path := filepath.Join(s.dir, "metadata.json")
 	_ = os.WriteFile(path, data, 0644)

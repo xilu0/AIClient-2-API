@@ -278,22 +278,7 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 				if debugSession != nil {
 					debugSession.SetStatusCode(apiErr.StatusCode)
 					debugSession.DumpKiroResponse(apiErr.Body)
-				}
-
-				// Always dump errors to file for troubleshooting (even if debug mode is off)
-				if debugSession == nil && h.debugDumper.ErrorDumpEnabled() {
-					errorSessionID := fmt.Sprintf("error-%d-%s", time.Now().UnixMilli(), acc.UUID[:8])
-					errorSession := h.debugDumper.NewErrorSession(errorSessionID)
-					if errorSession != nil {
-						errorSession.SetModel(req.Model)
-						errorSession.SetAccountUUID(acc.UUID)
-						errorSession.SetStatusCode(apiErr.StatusCode)
-						errorSession.SetErrorType(getErrorType(apiErr))
-						errorSession.DumpRequestJSON(req)
-						errorSession.DumpKiroRequest(reqBody)
-						errorSession.DumpKiroResponse(apiErr.Body)
-						errorSession.Fail(err)
-					}
+					debugSession.SetErrorType(getErrorType(apiErr))
 				}
 
 				if apiErr.IsPaymentRequired() {
@@ -644,22 +629,7 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 				if debugSession != nil {
 					debugSession.SetStatusCode(apiErr.StatusCode)
 					debugSession.DumpKiroResponse(apiErr.Body)
-				}
-
-				// Always dump errors to file for troubleshooting (even if debug mode is off)
-				if debugSession == nil && h.debugDumper.ErrorDumpEnabled() {
-					errorSessionID := fmt.Sprintf("error-%d-%s", time.Now().UnixMilli(), acc.UUID[:8])
-					errorSession := h.debugDumper.NewErrorSession(errorSessionID)
-					if errorSession != nil {
-						errorSession.SetModel(req.Model)
-						errorSession.SetAccountUUID(acc.UUID)
-						errorSession.SetStatusCode(apiErr.StatusCode)
-						errorSession.SetErrorType(getErrorType(apiErr))
-						errorSession.DumpRequestJSON(req)
-						errorSession.DumpKiroRequest(reqBody)
-						errorSession.DumpKiroResponse(apiErr.Body)
-						errorSession.Fail(err)
-					}
+					debugSession.SetErrorType(getErrorType(apiErr))
 				}
 
 				if apiErr.IsPaymentRequired() {
