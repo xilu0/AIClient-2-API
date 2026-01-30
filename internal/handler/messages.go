@@ -13,8 +13,10 @@ import (
 
 	"github.com/anthropics/AIClient-2-API/internal/account"
 	"github.com/anthropics/AIClient-2-API/internal/claude"
+	"github.com/anthropics/AIClient-2-API/internal/debug"
 	"github.com/anthropics/AIClient-2-API/internal/kiro"
 	"github.com/anthropics/AIClient-2-API/internal/redis"
+	"github.com/google/uuid"
 )
 
 // MessagesHandler handles POST /v1/messages requests.
@@ -25,6 +27,7 @@ type MessagesHandler struct {
 	kiroClient   *kiro.Client
 	logger       *slog.Logger
 	maxRetries   int
+	debugDumper  *debug.Dumper
 }
 
 // MessagesHandlerOptions configures the messages handler.
@@ -49,6 +52,11 @@ func NewMessagesHandler(opts MessagesHandlerOptions) *MessagesHandler {
 		maxRetries = 3
 	}
 
+	debugDumper := debug.NewDumper()
+	if debugDumper.Enabled() {
+		logger.Info("debug dumper enabled", "dir", "/tmp/kiro-debug")
+	}
+
 	return &MessagesHandler{
 		selector:     opts.Selector,
 		poolManager:  opts.PoolManager,
@@ -56,12 +64,27 @@ func NewMessagesHandler(opts MessagesHandlerOptions) *MessagesHandler {
 		kiroClient:   opts.KiroClient,
 		logger:       logger,
 		maxRetries:   maxRetries,
+		debugDumper:  debugDumper,
 	}
 }
 
 // ServeHTTP handles the messages request.
 func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
+	// Generate session ID for debugging (use request ID if available)
+	sessionID := r.Header.Get("x-request-id")
+	if sessionID == "" {
+		sessionID = uuid.New().String()
+	}
+
+	// Create debug session (nil if disabled)
+	debugSession := h.debugDumper.NewSession(sessionID)
+	defer func() {
+		if debugSession != nil {
+			debugSession.Close()
+		}
+	}()
 
 	// Parse request body
 	var req claude.MessageRequest
@@ -70,8 +93,14 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Dump request for debugging
+	if debugSession != nil {
+		debugSession.SetModel(req.Model)
+		debugSession.DumpRequestJSON(&req)
+	}
+
 	// Log received model for debugging
-	h.logger.Debug("received request", "model", req.Model)
+	h.logger.Debug("received request", "model", req.Model, "session_id", sessionID)
 
 	// Validate request
 	if err := h.validateRequest(&req); err != nil {
@@ -81,9 +110,9 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Handle streaming vs non-streaming
 	if req.Stream {
-		h.handleStreaming(ctx, w, &req)
+		h.handleStreaming(ctx, w, &req, debugSession)
 	} else {
-		h.handleNonStreaming(ctx, w, &req)
+		h.handleNonStreaming(ctx, w, &req, debugSession)
 	}
 }
 
@@ -146,7 +175,7 @@ func (h *MessagesHandler) validateRequest(req *claude.MessageRequest) *claude.AP
 }
 
 // handleStreaming handles streaming requests.
-func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWriter, req *claude.MessageRequest) {
+func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWriter, req *claude.MessageRequest, debugSession *debug.Session) {
 	// Estimate input tokens before making the request
 	estimatedInputTokens := claude.EstimateInputTokens(req)
 
@@ -165,6 +194,10 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 		acc, err := h.selector.SelectWithRetry(ctx, h.maxRetries-attempt, excluded)
 		if err != nil {
 			if errors.Is(err, account.ErrNoHealthyAccounts) {
+				if debugSession != nil {
+					debugSession.SetError(err)
+					debugSession.Fail(err)
+				}
 				_ = sseWriter.WriteError(claude.ErrNoHealthyAccounts)
 				return
 			}
@@ -175,6 +208,10 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 		// Track this account for error reporting
 		lastAccountUUID = acc.UUID
 		triedAccounts = append(triedAccounts, acc.UUID)
+		if debugSession != nil {
+			debugSession.AddTriedAccount(acc.UUID)
+			debugSession.SetAccountUUID(acc.UUID)
+		}
 
 		// Get token
 		token, err := h.tokenManager.GetToken(ctx, acc.UUID)
@@ -203,8 +240,17 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 		toolsJSON, _ := json.Marshal(req.Tools)
 		reqBody, metadata, err := kiro.BuildRequestBody(req.Model, messagesJSON, req.MaxTokens, true, req.GetSystemString(), acc.ProfileARN, toolsJSON)
 		if err != nil {
+			if debugSession != nil {
+				debugSession.SetError(err)
+				debugSession.Fail(err)
+			}
 			h.writeError(w, claude.NewAPIError("Failed to build request"))
 			return
+		}
+
+		// Dump Kiro request for debugging
+		if debugSession != nil {
+			debugSession.DumpKiroRequest(reqBody)
 		}
 
 		// Get region from token (idcRegion), default to us-east-1
@@ -226,6 +272,12 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 		if err != nil {
 			var apiErr *kiro.APIError
 			if errors.As(err, &apiErr) {
+				// Dump error response for debugging
+				if debugSession != nil {
+					debugSession.SetStatusCode(apiErr.StatusCode)
+					debugSession.DumpKiroResponse(apiErr.Body)
+				}
+
 				if apiErr.IsPaymentRequired() {
 					// 402 Payment Required - quota exhausted, set recovery time to next month
 					nextMonth := getNextMonthFirstDay()
@@ -260,6 +312,10 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 				}
 			}
 			h.logger.Error("Kiro API error", "error", err, "uuid", acc.UUID, "profile_arn", acc.ProfileARN)
+			if debugSession != nil {
+				debugSession.SetError(err)
+				debugSession.Fail(err)
+			}
 			_ = sseWriter.WriteError(claude.NewAPIError("Upstream error"))
 			return
 		}
@@ -268,15 +324,26 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 		_ = h.poolManager.IncrementUsage(ctx, acc.UUID)
 
 		// Stream the response with estimated tokens
-		h.streamResponse(ctx, body, sseWriter, req.Model, estimatedInputTokens)
+		h.streamResponse(ctx, body, sseWriter, req.Model, estimatedInputTokens, debugSession)
 		if err := body.Close(); err != nil {
 			h.logger.Warn("failed to close response body", "error", err)
+		}
+
+		// Mark debug session as success
+		if debugSession != nil {
+			debugSession.Success()
 		}
 		return
 	}
 
 	// All retries failed - pass through the original error for debugging
 	h.logger.Error("all retries failed", "error", lastErr, "tried_accounts", triedAccounts)
+
+	// Mark debug session as failed
+	if debugSession != nil {
+		debugSession.SetError(lastErr)
+		debugSession.Fail(lastErr)
+	}
 
 	// Return appropriate error based on the last error type, preserving original message
 	var apiErr *kiro.APIError
@@ -296,7 +363,7 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 }
 
 // streamResponse reads from Kiro and writes SSE events.
-func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, sseWriter *claude.SSEWriter, model string, estimatedInputTokens int) {
+func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, sseWriter *claude.SSEWriter, model string, estimatedInputTokens int, debugSession *debug.Session) {
 	// Use pooled parser to reduce GC pressure under high concurrency
 	parser := kiro.GetEventStreamParser()
 	defer kiro.ReleaseEventStreamParser(parser)
@@ -341,8 +408,17 @@ func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, ss
 			if !msg.IsEvent() {
 				if msg.IsException() {
 					h.logger.Error("received exception", "payload", string(msg.Payload))
+					// Dump exception for debugging
+					if debugSession != nil {
+						debugSession.AppendKiroChunk(msg.Payload)
+					}
 				}
 				continue
+			}
+
+			// Dump chunk for debugging
+			if debugSession != nil {
+				debugSession.AppendKiroChunk(msg.Payload)
 			}
 
 			// Parse Kiro chunk
@@ -417,7 +493,7 @@ func (h *MessagesHandler) sendFinalStreamEvents(sseWriter *claude.SSEWriter, con
 }
 
 // handleNonStreaming handles non-streaming requests.
-func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.ResponseWriter, req *claude.MessageRequest) {
+func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.ResponseWriter, req *claude.MessageRequest, debugSession *debug.Session) {
 	// Estimate input tokens before making the request
 	estimatedInputTokens := claude.EstimateInputTokens(req)
 
@@ -432,6 +508,10 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 		acc, err := h.selector.SelectWithRetry(ctx, h.maxRetries-attempt, excluded)
 		if err != nil {
 			if errors.Is(err, account.ErrNoHealthyAccounts) {
+				if debugSession != nil {
+					debugSession.SetError(err)
+					debugSession.Fail(err)
+				}
 				h.writeError(w, claude.ErrNoHealthyAccounts)
 				return
 			}
@@ -442,6 +522,10 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 		// Track this account for error reporting
 		lastAccountUUID = acc.UUID
 		triedAccounts = append(triedAccounts, acc.UUID)
+		if debugSession != nil {
+			debugSession.AddTriedAccount(acc.UUID)
+			debugSession.SetAccountUUID(acc.UUID)
+		}
 
 		// Get token
 		token, err := h.tokenManager.GetToken(ctx, acc.UUID)
@@ -471,8 +555,17 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 		toolsJSON, _ := json.Marshal(req.Tools)
 		reqBody, metadata, err := kiro.BuildRequestBody(req.Model, messagesJSON, req.MaxTokens, true, req.GetSystemString(), acc.ProfileARN, toolsJSON)
 		if err != nil {
+			if debugSession != nil {
+				debugSession.SetError(err)
+				debugSession.Fail(err)
+			}
 			h.writeError(w, claude.NewAPIError("Failed to build request"))
 			return
+		}
+
+		// Dump Kiro request for debugging
+		if debugSession != nil {
+			debugSession.DumpKiroRequest(reqBody)
 		}
 
 		// Get region from token (idcRegion), default to us-east-1
@@ -494,6 +587,12 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 		if err != nil {
 			var apiErr *kiro.APIError
 			if errors.As(err, &apiErr) {
+				// Dump error response for debugging
+				if debugSession != nil {
+					debugSession.SetStatusCode(apiErr.StatusCode)
+					debugSession.DumpKiroResponse(apiErr.Body)
+				}
+
 				if apiErr.IsPaymentRequired() {
 					// 402 Payment Required - quota exhausted, set recovery time to next month
 					nextMonth := getNextMonthFirstDay()
@@ -528,6 +627,10 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 				}
 			}
 			h.logger.Error("Kiro API error", "error", err, "uuid", acc.UUID, "profile_arn", acc.ProfileARN)
+			if debugSession != nil {
+				debugSession.SetError(err)
+				debugSession.Fail(err)
+			}
 			h.writeError(w, claude.NewAPIError("Upstream error"))
 			return
 		}
@@ -536,14 +639,23 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 		_ = h.poolManager.IncrementUsage(ctx, acc.UUID)
 
 		// Aggregate the response with estimated tokens
-		response := h.aggregateResponse(ctx, body, req.Model, estimatedInputTokens)
+		response := h.aggregateResponse(ctx, body, req.Model, estimatedInputTokens, debugSession)
 		if err := body.Close(); err != nil {
 			h.logger.Warn("failed to close response body", "error", err)
 		}
 
 		if response == nil {
+			if debugSession != nil {
+				debugSession.SetError(fmt.Errorf("failed to aggregate response"))
+				debugSession.Fail(fmt.Errorf("failed to aggregate response"))
+			}
 			h.writeError(w, claude.NewAPIError("Failed to aggregate response"))
 			return
+		}
+
+		// Mark debug session as success
+		if debugSession != nil {
+			debugSession.Success()
 		}
 
 		// Write JSON response with proper Content-Type
@@ -557,6 +669,12 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 
 	// All retries failed
 	h.logger.Error("all retries failed", "error", lastErr, "tried_accounts", triedAccounts)
+
+	// Mark debug session as failed
+	if debugSession != nil {
+		debugSession.SetError(lastErr)
+		debugSession.Fail(lastErr)
+	}
 
 	// Return appropriate error based on the last error type
 	var apiErr *kiro.APIError
@@ -576,7 +694,7 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 }
 
 // aggregateResponse reads all chunks and builds a complete response.
-func (h *MessagesHandler) aggregateResponse(ctx context.Context, body io.Reader, model string, estimatedInputTokens int) *claude.MessageResponse {
+func (h *MessagesHandler) aggregateResponse(ctx context.Context, body io.Reader, model string, estimatedInputTokens int, debugSession *debug.Session) *claude.MessageResponse {
 	// Use pooled parser to reduce GC pressure under high concurrency
 	parser := kiro.GetEventStreamParser()
 	defer kiro.ReleaseEventStreamParser(parser)
@@ -617,8 +735,17 @@ func (h *MessagesHandler) aggregateResponse(ctx context.Context, body io.Reader,
 			if !msg.IsEvent() {
 				if msg.IsException() {
 					h.logger.Error("received exception", "payload", string(msg.Payload))
+					// Dump exception for debugging
+					if debugSession != nil {
+						debugSession.AppendKiroChunk(msg.Payload)
+					}
 				}
 				continue
+			}
+
+			// Dump chunk for debugging
+			if debugSession != nil {
+				debugSession.AppendKiroChunk(msg.Payload)
 			}
 
 			// Parse Kiro chunk
