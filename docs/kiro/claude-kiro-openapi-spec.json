@@ -1,0 +1,444 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Kiro API (Claude Provider)",
+    "version": "1.0.0",
+    "description": "Reverse-engineered OpenAPI specification for Kiro's generateAssistantResponse endpoint, based on claude-kiro.js implementation."
+  },
+  "servers": [
+    {
+      "url": "https://q.{region}.amazonaws.com",
+      "variables": {
+        "region": {
+          "default": "us-east-1",
+          "description": "AWS Region (e.g., us-east-1, us-west-2)"
+        }
+      }
+    }
+  ],
+  "paths": {
+    "/generateAssistantResponse": {
+      "post": {
+        "summary": "Generate Assistant Response",
+        "description": "Generates a response from the AI assistant (Claude via Kiro/CodeWhisperer). Supports streaming and tool use.",
+        "operationId": "generateAssistantResponse",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "header",
+            "name": "amz-sdk-invocation-id",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "description": "Unique UUID for the invocation."
+          },
+          {
+            "in": "header",
+            "name": "x-amzn-kiro-agent-mode",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "vibe"
+              ],
+              "default": "vibe"
+            },
+            "required": true
+          },
+          {
+            "in": "header",
+            "name": "x-amz-user-agent",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateAssistantResponseRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response. Returns a stream of events or a single JSON object.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateAssistantResponseResponse"
+                }
+              },
+              "application/x-ndjson": {
+                "schema": {
+                  "$ref": "#/components/schemas/StreamEvent"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "401": {
+            "description": "Unauthorized. Token expired or invalid."
+          },
+          "402": {
+            "description": "Payment Required. Quota exceeded."
+          },
+          "429": {
+            "description": "Too Many Requests. Rate limit exceeded."
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/getUsageLimits": {
+      "get": {
+        "summary": "Get Usage Limits",
+        "description": "Retrieves the current usage limits and consumption for the account.",
+        "operationId": "getUsageLimits",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "isEmailRequired",
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
+          },
+          {
+            "in": "query",
+            "name": "origin",
+            "schema": {
+              "type": "string",
+              "default": "AI_EDITOR"
+            }
+          },
+          {
+            "in": "query",
+            "name": "resourceType",
+            "schema": {
+              "type": "string",
+              "default": "AGENTIC_REQUEST"
+            }
+          },
+          {
+            "in": "query",
+            "name": "profileArn",
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required if using social auth."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Usage limits retrieved successfully.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "limitCount": {
+                      "type": "integer"
+                    },
+                    "usedCount": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    },
+    "schemas": {
+      "GenerateAssistantResponseRequest": {
+        "type": "object",
+        "required": [
+          "conversationState"
+        ],
+        "properties": {
+          "conversationState": {
+            "type": "object",
+            "required": [
+              "chatTriggerType",
+              "conversationId",
+              "currentMessage"
+            ],
+            "properties": {
+              "chatTriggerType": {
+                "type": "string",
+                "enum": [
+                  "MANUAL"
+                ],
+                "default": "MANUAL"
+              },
+              "conversationId": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "history": {
+                "type": "array",
+                "items": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "userInputMessage": {
+                          "$ref": "#/components/schemas/UserInputMessage"
+                        }
+                      },
+                      "required": [
+                        "userInputMessage"
+                      ]
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "assistantResponseMessage": {
+                          "$ref": "#/components/schemas/AssistantResponseMessage"
+                        }
+                      },
+                      "required": [
+                        "assistantResponseMessage"
+                      ]
+                    }
+                  ]
+                }
+              },
+              "currentMessage": {
+                "type": "object",
+                "required": [
+                  "userInputMessage"
+                ],
+                "properties": {
+                  "userInputMessage": {
+                    "$ref": "#/components/schemas/UserInputMessage"
+                  }
+                }
+              }
+            }
+          },
+          "profileArn": {
+            "type": "string",
+            "description": "Required for social auth."
+          }
+        }
+      },
+      "UserInputMessage": {
+        "type": "object",
+        "required": [
+          "content",
+          "modelId",
+          "origin"
+        ],
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "modelId": {
+            "type": "string",
+            "example": "CLAUDE_SONNET_4_5_20250929_V1_0"
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "AI_EDITOR"
+            ],
+            "default": "AI_EDITOR"
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "format": {
+                  "type": "string",
+                  "description": "Image format (e.g. png, jpeg)"
+                },
+                "source": {
+                  "type": "object",
+                  "properties": {
+                    "bytes": {
+                      "type": "string",
+                      "format": "byte",
+                      "description": "Base64 encoded image data"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "userInputMessageContext": {
+            "type": "object",
+            "properties": {
+              "toolResults": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ToolResult"
+                }
+              },
+              "tools": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ToolDefinition"
+                }
+              }
+            }
+          }
+        }
+      },
+      "AssistantResponseMessage": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "toolUses": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ToolUse"
+            }
+          }
+        }
+      },
+      "ToolResult": {
+        "type": "object",
+        "properties": {
+          "content": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "text": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "success",
+              "error"
+            ]
+          },
+          "toolUseId": {
+            "type": "string"
+          }
+        }
+      },
+      "ToolDefinition": {
+        "type": "object",
+        "properties": {
+          "toolSpecification": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              },
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "json": {
+                    "type": "object",
+                    "description": "JSON Schema for the tool input"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "ToolUse": {
+        "type": "object",
+        "properties": {
+          "input": {
+             "oneOf": [
+                 { "type": "string" },
+                 { "type": "object" }
+             ],
+             "description": "Tool arguments"
+          },
+          "name": {
+            "type": "string"
+          },
+          "toolUseId": {
+            "type": "string"
+          }
+        }
+      },
+      "GenerateAssistantResponseResponse": {
+        "type": "object",
+        "description": "Non-streaming response structure (inferred)",
+        "properties": {
+          "conversationId": {
+            "type": "string"
+          },
+          "assistantResponseMessage": {
+            "$ref": "#/components/schemas/AssistantResponseMessage"
+          }
+        }
+      },
+      "StreamEvent": {
+        "type": "object",
+        "description": "One of the possible events in the stream",
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "content": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "toolUseId": { "type": "string" },
+              "input": { "type": "string" },
+              "stop": { "type": "boolean" }
+            }
+          },
+          {
+             "type": "object",
+             "properties": {
+                 "contextUsagePercentage": { "type": "number" }
+             }
+          }
+        ]
+      }
+    }
+  }
+}
