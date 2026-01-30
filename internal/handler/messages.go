@@ -356,7 +356,7 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 		_ = h.poolManager.IncrementUsage(ctx, acc.UUID)
 
 		// Stream the response with estimated tokens
-		h.streamResponse(ctx, body, sseWriter, req.Model, estimatedInputTokens, debugSession)
+		h.streamResponse(ctx, body, sseWriter, req.Model, estimatedInputTokens, acc.UUID, debugSession)
 		if err := body.Close(); err != nil {
 			h.logger.Warn("failed to close response body", "error", err)
 		}
@@ -395,7 +395,7 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 }
 
 // streamResponse reads from Kiro and writes SSE events.
-func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, sseWriter *claude.SSEWriter, model string, estimatedInputTokens int, debugSession *debug.Session) {
+func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, sseWriter *claude.SSEWriter, model string, estimatedInputTokens int, accountUUID string, debugSession *debug.Session) {
 	// Use pooled parser to reduce GC pressure under high concurrency
 	parser := kiro.GetEventStreamParser()
 	defer kiro.ReleaseEventStreamParser(parser)
@@ -409,7 +409,7 @@ func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, ss
 		select {
 		case <-ctx.Done():
 			// Send final events on context cancellation
-			h.sendFinalStreamEvents(sseWriter, converter)
+			h.sendFinalStreamEvents(sseWriter, converter, model, accountUUID)
 			return
 		default:
 		}
@@ -418,7 +418,7 @@ func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, ss
 		if err != nil {
 			if err == io.EOF {
 				// End of stream - send final events
-				h.sendFinalStreamEvents(sseWriter, converter)
+				h.sendFinalStreamEvents(sseWriter, converter, model, accountUUID)
 			} else {
 				h.logger.Error("error reading response", "error", err)
 			}
@@ -489,9 +489,20 @@ func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, ss
 
 // sendFinalStreamEvents sends the final SSE events at the end of a stream.
 // Uses the converter's state to avoid sending duplicate events.
-func (h *MessagesHandler) sendFinalStreamEvents(sseWriter *claude.SSEWriter, converter *claude.Converter) {
+func (h *MessagesHandler) sendFinalStreamEvents(sseWriter *claude.SSEWriter, converter *claude.Converter, model string, accountUUID string) {
 	// Get final usage from converter
 	finalUsage := converter.GetFinalUsage()
+
+	// Log usage information for monitoring
+	h.logger.Info("request completed",
+		"model", model,
+		"account_uuid", accountUUID,
+		"input_tokens", finalUsage.InputTokens,
+		"output_tokens", finalUsage.OutputTokens,
+		"cache_creation_tokens", finalUsage.CacheCreationInputTokens,
+		"cache_read_tokens", finalUsage.CacheReadInputTokens,
+		"total_input_tokens", finalUsage.InputTokens+finalUsage.CacheCreationInputTokens+finalUsage.CacheReadInputTokens,
+	)
 
 	// Send content_block_stop only if there's an unclosed content block
 	// The converter tracks this state and handles closing text blocks before tool_use
@@ -708,7 +719,7 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 		_ = h.poolManager.IncrementUsage(ctx, acc.UUID)
 
 		// Aggregate the response with estimated tokens
-		response := h.aggregateResponse(ctx, body, req.Model, estimatedInputTokens, debugSession)
+		response := h.aggregateResponse(ctx, body, req.Model, estimatedInputTokens, acc.UUID, debugSession)
 		if err := body.Close(); err != nil {
 			h.logger.Warn("failed to close response body", "error", err)
 		}
@@ -763,7 +774,7 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 }
 
 // aggregateResponse reads all chunks and builds a complete response.
-func (h *MessagesHandler) aggregateResponse(ctx context.Context, body io.Reader, model string, estimatedInputTokens int, debugSession *debug.Session) *claude.MessageResponse {
+func (h *MessagesHandler) aggregateResponse(ctx context.Context, body io.Reader, model string, estimatedInputTokens int, accountUUID string, debugSession *debug.Session) *claude.MessageResponse {
 	// Use pooled parser to reduce GC pressure under high concurrency
 	parser := kiro.GetEventStreamParser()
 	defer kiro.ReleaseEventStreamParser(parser)
@@ -775,7 +786,9 @@ func (h *MessagesHandler) aggregateResponse(ctx context.Context, body io.Reader,
 	for {
 		select {
 		case <-ctx.Done():
-			return aggregator.Build()
+			resp := aggregator.Build()
+			h.logUsage(model, accountUUID, &resp.Usage)
+			return resp
 		default:
 		}
 
@@ -783,10 +796,14 @@ func (h *MessagesHandler) aggregateResponse(ctx context.Context, body io.Reader,
 		if err != nil {
 			if err == io.EOF {
 				// End of stream, return aggregated response
-				return aggregator.Build()
+				resp := aggregator.Build()
+				h.logUsage(model, accountUUID, &resp.Usage)
+				return resp
 			}
 			h.logger.Error("error reading response", "error", err)
-			return aggregator.Build()
+			resp := aggregator.Build()
+			h.logUsage(model, accountUUID, &resp.Usage)
+			return resp
 		}
 
 		if n == 0 {
@@ -928,4 +945,20 @@ func getErrorType(apiErr *kiro.APIError) string {
 	default:
 		return fmt.Sprintf("http_%d", apiErr.StatusCode)
 	}
+}
+
+// logUsage logs the token usage information for a completed request.
+func (h *MessagesHandler) logUsage(model string, accountUUID string, usage *claude.Usage) {
+	if usage == nil {
+		return
+	}
+	h.logger.Info("request completed",
+		"model", model,
+		"account_uuid", accountUUID,
+		"input_tokens", usage.InputTokens,
+		"output_tokens", usage.OutputTokens,
+		"cache_creation_tokens", usage.CacheCreationInputTokens,
+		"cache_read_tokens", usage.CacheReadInputTokens,
+		"total_input_tokens", usage.InputTokens+usage.CacheCreationInputTokens+usage.CacheReadInputTokens,
+	)
 }
