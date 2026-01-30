@@ -3,7 +3,6 @@ package claude
 
 import (
 	"encoding/json"
-	"strings"
 )
 
 // Constants for token calculation
@@ -13,7 +12,26 @@ const (
 
 	// CharsPerToken is the average number of characters per token
 	// Used for simple estimation when tokenizer is not available
-	CharsPerToken = 4
+	// Using 3 instead of 4 for conservative estimation (overestimate tokens)
+	CharsPerToken = 3
+
+	// ImageTokensEstimate is the conservative token estimate for images
+	// Claude typically uses 1000-5000 tokens per image depending on size
+	// Using 2500 as a conservative middle estimate
+	ImageTokensEstimate = 2500
+
+	// DocumentTokensMultiplier is the multiplier for document base64 data
+	// base64 to bytes ratio is ~0.75, then divide by chars per token
+	// Using conservative estimate: 0.75 / 3 ≈ 0.25
+	DocumentTokensMultiplier = 0.25
+
+	// ToolOverheadTokens is the overhead tokens per tool definition
+	// Accounts for JSON structure, formatting, etc.
+	ToolOverheadTokens = 20
+
+	// MessageOverheadTokens is the overhead tokens per message
+	// Accounts for role markers, formatting, etc.
+	MessageOverheadTokens = 4
 )
 
 // TokenUsage represents the distributed token usage with cache tokens.
@@ -73,39 +91,61 @@ func (t TokenUsage) TotalInputTokens() int {
 }
 
 // EstimateInputTokens estimates the input token count from a request.
-// Uses simple character-based estimation (chars / 4).
+// Uses conservative character-based estimation to avoid exceeding model limits.
+// This implementation intentionally overestimates to prevent context overflow.
 func EstimateInputTokens(req *MessageRequest) int {
-	var totalChars int
+	var totalTokens int
 
 	// Count system prompt
 	systemStr := req.GetSystemString()
 	if systemStr != "" {
-		totalChars += len(systemStr)
+		totalTokens += countTextTokens(systemStr)
 	}
 
 	// Count thinking prefix if enabled
 	if req.Thinking != nil && req.Thinking.Type == "enabled" {
-		// Add thinking prefix tokens
-		totalChars += 100 // Approximate overhead for thinking mode
+		// Add thinking prefix tokens (conservative estimate)
+		totalTokens += 50
 	}
 
 	// Count all messages
 	for _, msg := range req.Messages {
-		totalChars += countContentChars(msg.Content)
+		totalTokens += MessageOverheadTokens // Role marker overhead
+		totalTokens += countMessageTokens(msg.Content)
 	}
 
-	// Convert chars to tokens (approximate: 4 chars per token)
-	tokens := totalChars / CharsPerToken
-	if tokens < 1 && totalChars > 0 {
+	// Count tool definitions
+	for _, tool := range req.Tools {
+		totalTokens += ToolOverheadTokens
+		totalTokens += countTextTokens(tool.Name)
+		totalTokens += countTextTokens(tool.Description)
+		if len(tool.InputSchema) > 0 {
+			totalTokens += len(tool.InputSchema) / CharsPerToken
+		}
+	}
+
+	if totalTokens < 1 {
+		totalTokens = 1
+	}
+
+	return totalTokens
+}
+
+// countTextTokens counts tokens for plain text using conservative estimation.
+func countTextTokens(text string) int {
+	if text == "" {
+		return 0
+	}
+	tokens := len(text) / CharsPerToken
+	if tokens < 1 {
 		tokens = 1
 	}
-
 	return tokens
 }
 
-// countContentChars counts characters in message content.
-// Content can be a string or array of content blocks.
-func countContentChars(content json.RawMessage) int {
+// countMessageTokens counts tokens for message content.
+// Handles string content, content blocks (text, image, document, tool_use, tool_result).
+func countMessageTokens(content json.RawMessage) int {
 	if len(content) == 0 {
 		return 0
 	}
@@ -113,7 +153,7 @@ func countContentChars(content json.RawMessage) int {
 	// Try to parse as string first
 	var str string
 	if err := json.Unmarshal(content, &str); err == nil {
-		return len(str)
+		return countTextTokens(str)
 	}
 
 	// Try to parse as array of content blocks
@@ -121,27 +161,56 @@ func countContentChars(content json.RawMessage) int {
 	if err := json.Unmarshal(content, &blocks); err == nil {
 		var total int
 		for _, block := range blocks {
-			switch block.Type {
-			case "text":
-				total += len(block.Text)
-			case "thinking":
-				total += len(block.Thinking)
-			case "tool_use":
-				if block.Input != nil {
-					total += len(block.Input)
-				}
-			case "tool_result":
-				// Tool results can have nested content
-				if len(block.Content) > 0 {
-					total += countContentChars(block.Content)
-				}
-			}
+			total += countContentBlockTokens(&block)
 		}
 		return total
 	}
 
-	// Fallback: count raw JSON length
-	return len(content)
+	// Fallback: conservative estimate from raw JSON length
+	return len(content) / CharsPerToken
+}
+
+// countContentBlockTokens counts tokens for a single content block.
+func countContentBlockTokens(block *ContentBlock) int {
+	switch block.Type {
+	case "text":
+		return countTextTokens(block.Text)
+
+	case "thinking":
+		return countTextTokens(block.Thinking)
+
+	case "image":
+		// Conservative fixed estimate for images
+		return ImageTokensEstimate
+
+	case "document":
+		// Estimate from base64 data if available
+		if block.Source != nil && block.Source.Data != "" {
+			tokens := int(float64(len(block.Source.Data)) * DocumentTokensMultiplier)
+			if tokens < 100 {
+				tokens = 100 // Minimum for any document
+			}
+			return tokens
+		}
+		return 500 // Default estimate for documents without data
+
+	case "tool_use":
+		tokens := countTextTokens(block.Name)
+		if len(block.Input) > 0 {
+			tokens += len(block.Input) / CharsPerToken
+		}
+		return tokens
+
+	case "tool_result":
+		// Tool results can have nested content
+		if len(block.Content) > 0 {
+			return countMessageTokens(block.Content)
+		}
+		return 0
+
+	default:
+		return 0
+	}
 }
 
 // CalculateInputTokensFromPercentage calculates input tokens from context usage percentage.
@@ -159,15 +228,59 @@ func CalculateInputTokensFromPercentage(percentage float64, outputTokens int) in
 }
 
 // CountTextTokens provides a simple token count estimation for text.
-// Uses character count divided by average chars per token.
+// Uses character count divided by average chars per token (conservative).
 func CountTextTokens(text string) int {
-	if text == "" {
-		return 0
+	return countTextTokens(text)
+}
+
+// TokenEstimateDetails contains detailed breakdown of token estimation.
+type TokenEstimateDetails struct {
+	SystemTokens     int `json:"system_tokens"`
+	MessagesTokens   int `json:"messages_tokens"`
+	ToolsTokens      int `json:"tools_tokens"`
+	ThinkingOverhead int `json:"thinking_overhead"`
+}
+
+// EstimateInputTokensWithDetails estimates input tokens and returns detailed breakdown.
+// This is useful for debugging and comparing with actual token counts.
+func EstimateInputTokensWithDetails(req *MessageRequest) (int, TokenEstimateDetails) {
+	var details TokenEstimateDetails
+	var totalTokens int
+
+	// Count system prompt
+	systemStr := req.GetSystemString()
+	if systemStr != "" {
+		details.SystemTokens = countTextTokens(systemStr)
+		totalTokens += details.SystemTokens
 	}
-	// Simple estimation: ~4 characters per token on average
-	tokens := len(strings.TrimSpace(text)) / CharsPerToken
-	if tokens < 1 && len(text) > 0 {
-		tokens = 1
+
+	// Count thinking prefix if enabled
+	if req.Thinking != nil && req.Thinking.Type == "enabled" {
+		details.ThinkingOverhead = 50
+		totalTokens += details.ThinkingOverhead
 	}
-	return tokens
+
+	// Count all messages
+	for _, msg := range req.Messages {
+		details.MessagesTokens += MessageOverheadTokens // Role marker overhead
+		details.MessagesTokens += countMessageTokens(msg.Content)
+	}
+	totalTokens += details.MessagesTokens
+
+	// Count tool definitions
+	for _, tool := range req.Tools {
+		details.ToolsTokens += ToolOverheadTokens
+		details.ToolsTokens += countTextTokens(tool.Name)
+		details.ToolsTokens += countTextTokens(tool.Description)
+		if len(tool.InputSchema) > 0 {
+			details.ToolsTokens += len(tool.InputSchema) / CharsPerToken
+		}
+	}
+	totalTokens += details.ToolsTokens
+
+	if totalTokens < 1 {
+		totalTokens = 1
+	}
+
+	return totalTokens, details
 }

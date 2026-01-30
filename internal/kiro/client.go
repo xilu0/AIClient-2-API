@@ -129,27 +129,51 @@ func (c *Client) SendStreamingRequest(ctx context.Context, req *Request) (io.Rea
 			}
 		}
 
-		// Extract modelId from request body for debugging
+		// Extract summary info from request body for logging
 		var reqBody map[string]interface{}
 		modelIdInRequest := "unknown"
+		messageCount := 0
+		hasTools := false
+		hasToolResults := false
+		hasImages := false
+
 		if err := json.Unmarshal(req.Body, &reqBody); err == nil {
 			if convState, ok := reqBody["conversationState"].(map[string]interface{}); ok {
+				if history, ok := convState["history"].([]interface{}); ok {
+					messageCount = len(history)
+				}
 				if currentMsg, ok := convState["currentMessage"].(map[string]interface{}); ok {
 					if userInput, ok := currentMsg["userInputMessage"].(map[string]interface{}); ok {
 						if modelId, ok := userInput["modelId"].(string); ok {
 							modelIdInRequest = modelId
+						}
+						if images, ok := userInput["images"].([]interface{}); ok && len(images) > 0 {
+							hasImages = true
+						}
+						if ctx, ok := userInput["userInputMessageContext"].(map[string]interface{}); ok {
+							if tools, ok := ctx["tools"].([]interface{}); ok && len(tools) > 0 {
+								hasTools = true
+							}
+							if results, ok := ctx["toolResults"].([]interface{}); ok && len(results) > 0 {
+								hasToolResults = true
+							}
 						}
 					}
 				}
 			}
 		}
 
+		// Log error with summary info (full request/response dumped to file by handler)
 		c.logger.Error("Kiro API error",
 			"status", resp.StatusCode,
 			"profile_arn", req.ProfileARN,
 			"original_model", originalModel,
 			"kiro_model", kiroModel,
 			"model_id_in_request", modelIdInRequest,
+			"history_count", messageCount,
+			"has_tools", hasTools,
+			"has_tool_results", hasToolResults,
+			"has_images", hasImages,
 			"response_body", string(body),
 		)
 
@@ -213,6 +237,19 @@ func (e *APIError) IsPaymentRequired() bool {
 // This typically indicates the request format is invalid or the model is not supported.
 func (e *APIError) IsBadRequest() bool {
 	return e.StatusCode == http.StatusBadRequest
+}
+
+// IsContextTooLong returns true if the error indicates the input context is too long.
+// This checks for Kiro-specific error messages that indicate context length limits.
+func (e *APIError) IsContextTooLong() bool {
+	if e.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	bodyStr := string(e.Body)
+	// Check for known Kiro context length error messages
+	return strings.Contains(bodyStr, "Input is too long") ||
+		strings.Contains(bodyStr, "CONTENT_LENGTH_EXCEEDS_THRESHOLD") ||
+		strings.Contains(bodyStr, "Improperly formed request")
 }
 
 // buildKiroURL builds the Kiro API URL for the given region.

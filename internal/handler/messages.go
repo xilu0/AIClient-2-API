@@ -278,6 +278,22 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 					debugSession.DumpKiroResponse(apiErr.Body)
 				}
 
+				// Always dump errors to file for troubleshooting (even if debug mode is off)
+				if debugSession == nil && h.debugDumper.ErrorDumpEnabled() {
+					errorSessionID := fmt.Sprintf("error-%d-%s", time.Now().UnixMilli(), acc.UUID[:8])
+					errorSession := h.debugDumper.NewErrorSession(errorSessionID)
+					if errorSession != nil {
+						errorSession.SetModel(req.Model)
+						errorSession.SetAccountUUID(acc.UUID)
+						errorSession.SetStatusCode(apiErr.StatusCode)
+						errorSession.SetErrorType(getErrorType(apiErr))
+						errorSession.DumpRequestJSON(req)
+						errorSession.DumpKiroRequest(reqBody)
+						errorSession.DumpKiroResponse(apiErr.Body)
+						errorSession.Fail(err)
+					}
+				}
+
 				if apiErr.IsPaymentRequired() {
 					// 402 Payment Required - quota exhausted, set recovery time to next month
 					nextMonth := getNextMonthFirstDay()
@@ -296,6 +312,22 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 					excluded[acc.UUID] = true
 					lastErr = err
 					continue
+				}
+				// Check for context too long error BEFORE generic IsBadRequest
+				// Return 503 to trigger client-side compaction
+				if apiErr.IsContextTooLong() {
+					h.logger.Warn("Context too long, returning 503 to trigger compaction",
+						"uuid", acc.UUID,
+						"profile_arn", acc.ProfileARN,
+						"model", req.Model)
+					if debugSession != nil {
+						debugSession.SetError(err)
+						debugSession.Fail(err)
+					}
+					_ = sseWriter.WriteError(claude.NewOverloadedError(
+						"Input context is too long. Please compact or reduce your conversation history to continue. " +
+							"Consider using /compact command or starting a new conversation."))
+					return
 				}
 				if apiErr.IsBadRequest() {
 					// 400 Bad Request - likely model not supported by this account
@@ -598,6 +630,22 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 					debugSession.DumpKiroResponse(apiErr.Body)
 				}
 
+				// Always dump errors to file for troubleshooting (even if debug mode is off)
+				if debugSession == nil && h.debugDumper.ErrorDumpEnabled() {
+					errorSessionID := fmt.Sprintf("error-%d-%s", time.Now().UnixMilli(), acc.UUID[:8])
+					errorSession := h.debugDumper.NewErrorSession(errorSessionID)
+					if errorSession != nil {
+						errorSession.SetModel(req.Model)
+						errorSession.SetAccountUUID(acc.UUID)
+						errorSession.SetStatusCode(apiErr.StatusCode)
+						errorSession.SetErrorType(getErrorType(apiErr))
+						errorSession.DumpRequestJSON(req)
+						errorSession.DumpKiroRequest(reqBody)
+						errorSession.DumpKiroResponse(apiErr.Body)
+						errorSession.Fail(err)
+					}
+				}
+
 				if apiErr.IsPaymentRequired() {
 					// 402 Payment Required - quota exhausted, set recovery time to next month
 					nextMonth := getNextMonthFirstDay()
@@ -616,6 +664,22 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 					excluded[acc.UUID] = true
 					lastErr = err
 					continue
+				}
+				// Check for context too long error BEFORE generic IsBadRequest
+				// Return 503 to trigger client-side compaction
+				if apiErr.IsContextTooLong() {
+					h.logger.Warn("Context too long, returning 503 to trigger compaction",
+						"uuid", acc.UUID,
+						"profile_arn", acc.ProfileARN,
+						"model", req.Model)
+					if debugSession != nil {
+						debugSession.SetError(err)
+						debugSession.Fail(err)
+					}
+					h.writeError(w, claude.NewOverloadedError(
+						"Input context is too long. Please compact or reduce your conversation history to continue. "+
+							"Consider using /compact command or starting a new conversation."))
+					return
 				}
 				if apiErr.IsBadRequest() {
 					// 400 Bad Request - likely model not supported by this account
@@ -843,4 +907,25 @@ func getNextMonthFirstDay() time.Time {
 		nextYear++
 	}
 	return time.Date(nextYear, nextMonth, 1, 0, 0, 0, 0, time.UTC)
+}
+
+// getErrorType returns a human-readable error type string for the API error.
+func getErrorType(apiErr *kiro.APIError) string {
+	if apiErr == nil {
+		return "unknown"
+	}
+	switch {
+	case apiErr.IsBadRequest():
+		return "bad_request"
+	case apiErr.IsRateLimited():
+		return "rate_limit"
+	case apiErr.IsOverloaded():
+		return "overloaded"
+	case apiErr.IsForbidden():
+		return "forbidden"
+	case apiErr.IsPaymentRequired():
+		return "payment_required"
+	default:
+		return fmt.Sprintf("http_%d", apiErr.StatusCode)
+	}
 }

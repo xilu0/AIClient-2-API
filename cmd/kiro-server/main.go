@@ -95,6 +95,10 @@ func main() {
 		MaxRetries:   cfg.MaxRetries,
 	})
 
+	countTokensHandler := handler.NewCountTokensHandler(handler.CountTokensHandlerOptions{
+		Logger: logger,
+	})
+
 	// Create API key validator
 	validateAPIKey := func(key string) bool {
 		if apiKey == "" {
@@ -129,6 +133,9 @@ func main() {
 
 	// Messages endpoint
 	mux.Handle("POST /v1/messages", messagesHandler)
+
+	// Count tokens endpoint (local estimation, no API call)
+	mux.Handle("POST /v1/messages/count_tokens", countTokensHandler)
 
 	// Apply middleware
 	var httpHandler http.Handler = mux

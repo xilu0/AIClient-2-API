@@ -148,7 +148,7 @@ func TestEstimateInputTokens(t *testing.T) {
 				},
 			},
 			minTokens: 1,
-			maxTokens: 10,
+			maxTokens: 15, // Conservative: 13 chars / 3 + overhead
 		},
 		{
 			name: "request with system prompt",
@@ -158,8 +158,8 @@ func TestEstimateInputTokens(t *testing.T) {
 					{Role: "user", Content: []byte(`"Hello, world!"`)},
 				},
 			},
-			minTokens: 5,
-			maxTokens: 20,
+			minTokens: 10,
+			maxTokens: 30, // Conservative estimation
 		},
 		{
 			name: "request with thinking enabled",
@@ -169,8 +169,8 @@ func TestEstimateInputTokens(t *testing.T) {
 					{Role: "user", Content: []byte(`"Hello"`)},
 				},
 			},
-			minTokens: 20,
-			maxTokens: 50,
+			minTokens: 50, // Thinking adds 50 tokens overhead
+			maxTokens: 70,
 		},
 		{
 			name: "empty request",
@@ -178,7 +178,7 @@ func TestEstimateInputTokens(t *testing.T) {
 				Messages: []claude.Message{},
 			},
 			minTokens: 0,
-			maxTokens: 0,
+			maxTokens: 1, // May return 1 as minimum
 		},
 	}
 
@@ -199,8 +199,8 @@ func TestCountTextTokens(t *testing.T) {
 	}{
 		{"empty string", "", 0},
 		{"short text", "Hi", 1},
-		{"medium text", "Hello, world!", 3},
-		{"longer text", "This is a longer text that should have more tokens", 12},
+		{"medium text", "Hello, world!", 4},  // 13 chars / 3 = 4 (conservative)
+		{"longer text", "This is a longer text that should have more tokens", 16}, // 50 chars / 3 = 16
 	}
 
 	for _, tt := range tests {

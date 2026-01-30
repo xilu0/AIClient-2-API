@@ -266,8 +266,8 @@ func TestGetFinalUsage_WithEstimatedTokens(t *testing.T) {
 	assert.Equal(t, 894, usage.CacheReadInputTokens)
 
 	// Output tokens should be calculated from accumulated text
-	// "Hello, world!" = 13 chars / 4 = 3 tokens
-	assert.Equal(t, 3, usage.OutputTokens)
+	// "Hello, world!" = 13 chars / 3 = 4 tokens (conservative estimation)
+	assert.Equal(t, 4, usage.OutputTokens)
 }
 
 func TestGetFinalUsage_WithContextUsagePercentage(t *testing.T) {
@@ -285,23 +285,23 @@ func TestGetFinalUsage_WithContextUsagePercentage(t *testing.T) {
 	// Get final usage
 	usage := converter.GetFinalUsage()
 
-	// Output tokens from "Hello!" = 6 chars / 4 = 1 token
-	assert.Equal(t, 1, usage.OutputTokens)
+	// Output tokens from "Hello!" = 6 chars / 3 = 2 tokens (conservative estimation)
+	assert.Equal(t, 2, usage.OutputTokens)
 
 	// Input tokens should be calculated from percentage:
 	// total = 172500 * 1.0 / 100 = 1725
-	// input = 1725 - 1 = 1724
+	// input = 1725 - 2 = 1723
 	// After distribution (1:2:25 ratio):
-	// input_tokens = 1724 * 1 / 28 = 61
-	// cache_creation = 1724 * 2 / 28 = 123
-	// cache_read = 1724 - 61 - 123 = 1540
+	// input_tokens = 1723 * 1 / 28 = 61
+	// cache_creation = 1723 * 2 / 28 = 123
+	// cache_read = 1723 - 61 - 123 = 1539
 	assert.Equal(t, 61, usage.InputTokens)
 	assert.Equal(t, 123, usage.CacheCreationInputTokens)
-	assert.Equal(t, 1540, usage.CacheReadInputTokens)
+	assert.Equal(t, 1539, usage.CacheReadInputTokens)
 
 	// Verify total equals calculated input
 	total := usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens
-	assert.Equal(t, 1724, total)
+	assert.Equal(t, 1723, total)
 }
 
 func TestGetFinalUsage_EmptyContent(t *testing.T) {
