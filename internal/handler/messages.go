@@ -176,6 +176,8 @@ func (h *MessagesHandler) validateRequest(req *claude.MessageRequest) *claude.AP
 
 // handleStreaming handles streaming requests.
 func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWriter, req *claude.MessageRequest, debugSession *debug.Session) {
+	startTime := time.Now()
+
 	// Estimate input tokens before making the request
 	estimatedInputTokens := claude.EstimateInputTokens(req)
 
@@ -356,7 +358,7 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 		_ = h.poolManager.IncrementUsage(ctx, acc.UUID)
 
 		// Stream the response with estimated tokens
-		h.streamResponse(ctx, body, sseWriter, req.Model, estimatedInputTokens, acc.UUID, debugSession)
+		h.streamResponse(ctx, body, sseWriter, req.Model, estimatedInputTokens, acc.UUID, startTime, debugSession)
 		if err := body.Close(); err != nil {
 			h.logger.Warn("failed to close response body", "error", err)
 		}
@@ -395,7 +397,7 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 }
 
 // streamResponse reads from Kiro and writes SSE events.
-func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, sseWriter *claude.SSEWriter, model string, estimatedInputTokens int, accountUUID string, debugSession *debug.Session) {
+func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, sseWriter *claude.SSEWriter, model string, estimatedInputTokens int, accountUUID string, startTime time.Time, debugSession *debug.Session) {
 	// Use pooled parser to reduce GC pressure under high concurrency
 	parser := kiro.GetEventStreamParser()
 	defer kiro.ReleaseEventStreamParser(parser)
@@ -409,7 +411,7 @@ func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, ss
 		select {
 		case <-ctx.Done():
 			// Send final events on context cancellation
-			h.sendFinalStreamEvents(sseWriter, converter, model, accountUUID)
+			h.sendFinalStreamEvents(sseWriter, converter, model, accountUUID, startTime)
 			return
 		default:
 		}
@@ -418,7 +420,7 @@ func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, ss
 		if err != nil {
 			if err == io.EOF {
 				// End of stream - send final events
-				h.sendFinalStreamEvents(sseWriter, converter, model, accountUUID)
+				h.sendFinalStreamEvents(sseWriter, converter, model, accountUUID, startTime)
 			} else {
 				h.logger.Error("error reading response", "error", err)
 			}
@@ -489,7 +491,7 @@ func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, ss
 
 // sendFinalStreamEvents sends the final SSE events at the end of a stream.
 // Uses the converter's state to avoid sending duplicate events.
-func (h *MessagesHandler) sendFinalStreamEvents(sseWriter *claude.SSEWriter, converter *claude.Converter, model string, accountUUID string) {
+func (h *MessagesHandler) sendFinalStreamEvents(sseWriter *claude.SSEWriter, converter *claude.Converter, model string, accountUUID string, startTime time.Time) {
 	// Get final usage from converter
 	finalUsage := converter.GetFinalUsage()
 
@@ -502,6 +504,7 @@ func (h *MessagesHandler) sendFinalStreamEvents(sseWriter *claude.SSEWriter, con
 		"cache_creation_tokens", finalUsage.CacheCreationInputTokens,
 		"cache_read_tokens", finalUsage.CacheReadInputTokens,
 		"total_input_tokens", finalUsage.InputTokens+finalUsage.CacheCreationInputTokens+finalUsage.CacheReadInputTokens,
+		"duration_ms", time.Since(startTime).Milliseconds(),
 	)
 
 	// Send content_block_stop only if there's an unclosed content block
@@ -542,6 +545,8 @@ func (h *MessagesHandler) sendFinalStreamEvents(sseWriter *claude.SSEWriter, con
 
 // handleNonStreaming handles non-streaming requests.
 func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.ResponseWriter, req *claude.MessageRequest, debugSession *debug.Session) {
+	startTime := time.Now()
+
 	// Estimate input tokens before making the request
 	estimatedInputTokens := claude.EstimateInputTokens(req)
 
@@ -719,7 +724,7 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 		_ = h.poolManager.IncrementUsage(ctx, acc.UUID)
 
 		// Aggregate the response with estimated tokens
-		response := h.aggregateResponse(ctx, body, req.Model, estimatedInputTokens, acc.UUID, debugSession)
+		response := h.aggregateResponse(ctx, body, req.Model, estimatedInputTokens, acc.UUID, startTime, debugSession)
 		if err := body.Close(); err != nil {
 			h.logger.Warn("failed to close response body", "error", err)
 		}
@@ -774,7 +779,7 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 }
 
 // aggregateResponse reads all chunks and builds a complete response.
-func (h *MessagesHandler) aggregateResponse(ctx context.Context, body io.Reader, model string, estimatedInputTokens int, accountUUID string, debugSession *debug.Session) *claude.MessageResponse {
+func (h *MessagesHandler) aggregateResponse(ctx context.Context, body io.Reader, model string, estimatedInputTokens int, accountUUID string, startTime time.Time, debugSession *debug.Session) *claude.MessageResponse {
 	// Use pooled parser to reduce GC pressure under high concurrency
 	parser := kiro.GetEventStreamParser()
 	defer kiro.ReleaseEventStreamParser(parser)
@@ -787,7 +792,7 @@ func (h *MessagesHandler) aggregateResponse(ctx context.Context, body io.Reader,
 		select {
 		case <-ctx.Done():
 			resp := aggregator.Build()
-			h.logUsage(model, accountUUID, &resp.Usage)
+			h.logUsage(model, accountUUID, &resp.Usage, startTime)
 			return resp
 		default:
 		}
@@ -797,12 +802,12 @@ func (h *MessagesHandler) aggregateResponse(ctx context.Context, body io.Reader,
 			if err == io.EOF {
 				// End of stream, return aggregated response
 				resp := aggregator.Build()
-				h.logUsage(model, accountUUID, &resp.Usage)
+				h.logUsage(model, accountUUID, &resp.Usage, startTime)
 				return resp
 			}
 			h.logger.Error("error reading response", "error", err)
 			resp := aggregator.Build()
-			h.logUsage(model, accountUUID, &resp.Usage)
+			h.logUsage(model, accountUUID, &resp.Usage, startTime)
 			return resp
 		}
 
@@ -948,7 +953,7 @@ func getErrorType(apiErr *kiro.APIError) string {
 }
 
 // logUsage logs the token usage information for a completed request.
-func (h *MessagesHandler) logUsage(model string, accountUUID string, usage *claude.Usage) {
+func (h *MessagesHandler) logUsage(model string, accountUUID string, usage *claude.Usage, startTime time.Time) {
 	if usage == nil {
 		return
 	}
@@ -960,5 +965,6 @@ func (h *MessagesHandler) logUsage(model string, accountUUID string, usage *clau
 		"cache_creation_tokens", usage.CacheCreationInputTokens,
 		"cache_read_tokens", usage.CacheReadInputTokens,
 		"total_input_tokens", usage.InputTokens+usage.CacheCreationInputTokens+usage.CacheReadInputTokens,
+		"duration_ms", time.Since(startTime).Milliseconds(),
 	)
 }

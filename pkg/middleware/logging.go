@@ -87,15 +87,16 @@ func Logging(logger *slog.Logger) func(http.Handler) http.Handler {
 			next.ServeHTTP(wrapped, r)
 
 			// Log request completion
-			duration := time.Since(start)
-			logger.Info("request completed",
-				"request_id", requestID,
-				"method", r.Method,
-				"path", r.URL.Path,
-				"status", wrapped.status,
-				"size", wrapped.size,
-				"duration_ms", duration.Milliseconds(),
-			)
+			// Skip for /v1/messages - handler logs completion with usage info
+			if r.URL.Path != "/v1/messages" {
+				duration := time.Since(start)
+				logger.Info("request completed",
+					"method", r.Method,
+					"path", r.URL.Path,
+					"status", wrapped.status,
+					"duration_ms", duration.Milliseconds(),
+				)
+			}
 		})
 	}
 }
