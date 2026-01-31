@@ -316,6 +316,9 @@ func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool,
 	}
 	var mergedMessages []MergedMessage
 
+	// Track all filtered tool use IDs across all messages
+	filteredToolUseIDs := make(map[string]bool)
+
 	for _, msg := range claudeMessages {
 		var newMsg MergedMessage
 		if msg.Role == "user" {
@@ -324,6 +327,10 @@ func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool,
 		} else {
 			newMsg.Role = "assistant"
 			newMsg.AssistantContent = parseAssistantContent(msg.Content)
+			// Collect filtered tool use IDs
+			for _, id := range newMsg.AssistantContent.FilteredToolUseIDs {
+				filteredToolUseIDs[id] = true
+			}
 		}
 
 		if len(mergedMessages) > 0 {
@@ -345,6 +352,7 @@ func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool,
 						lastMsg.AssistantContent.Text += newMsg.AssistantContent.Text
 					}
 					lastMsg.AssistantContent.ToolUses = append(lastMsg.AssistantContent.ToolUses, newMsg.AssistantContent.ToolUses...)
+					lastMsg.AssistantContent.FilteredToolUseIDs = append(lastMsg.AssistantContent.FilteredToolUseIDs, newMsg.AssistantContent.FilteredToolUseIDs...)
 				}
 				continue
 			}
@@ -381,9 +389,11 @@ func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool,
 		msg := mergedMessages[i]
 		if msg.Role == "user" {
 			content := msg.UserContent.Text
+			// Filter out tool results whose corresponding tool_use was filtered (e.g., empty input)
+			filteredResults := filterToolResults(msg.UserContent.ToolResults, filteredToolUseIDs)
 			// Kiro API requires content to never be empty, even in history
 			if content == "" {
-				if len(msg.UserContent.ToolResults) > 0 {
+				if len(filteredResults) > 0 {
 					content = "Tool results provided."
 				} else if len(msg.UserContent.Images) > 0 {
 					content = "Image provided."
@@ -397,8 +407,8 @@ func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool,
 				"modelId": kiroModel,
 				"origin":  "AI_EDITOR",
 			}
-			if len(msg.UserContent.ToolResults) > 0 {
-				uniqueToolResults := deduplicateToolResults(msg.UserContent.ToolResults)
+			if len(filteredResults) > 0 {
+				uniqueToolResults := deduplicateToolResults(filteredResults)
 				userMsg["userInputMessageContext"] = map[string]interface{}{
 					"toolResults": uniqueToolResults,
 				}
@@ -451,7 +461,8 @@ func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool,
 	} else {
 		// User message is current
 		currentContent = lastMsg.UserContent.Text
-		currentToolResults = lastMsg.UserContent.ToolResults
+		// Filter out tool results whose corresponding tool_use was filtered (e.g., empty input)
+		currentToolResults = filterToolResults(lastMsg.UserContent.ToolResults, filteredToolUseIDs)
 		currentImages = lastMsg.UserContent.Images
 
 		// Ensure history ends with assistant
@@ -558,8 +569,9 @@ type ParsedUserContent struct {
 
 // ParsedAssistantContent holds the parsed components of an assistant message.
 type ParsedAssistantContent struct {
-	Text     string
-	ToolUses []map[string]interface{}
+	Text               string
+	ToolUses           []map[string]interface{}
+	FilteredToolUseIDs []string // IDs of tool_uses that were filtered out (e.g., empty input)
 }
 
 // parseMessageContent parses a user message content into its components.
@@ -673,10 +685,17 @@ func parseAssistantContent(content json.RawMessage) ParsedAssistantContent {
 
 			// Skip tool uses with empty input - Kiro API rejects them with "Improperly formed request"
 			// Empty input can be: nil, empty object {}, or empty map
+			// Track filtered IDs so corresponding tool_results can also be filtered
 			if input == nil {
+				if block.ID != "" {
+					result.FilteredToolUseIDs = append(result.FilteredToolUseIDs, block.ID)
+				}
 				continue
 			}
 			if inputMap, ok := input.(map[string]interface{}); ok && len(inputMap) == 0 {
+				if block.ID != "" {
+					result.FilteredToolUseIDs = append(result.FilteredToolUseIDs, block.ID)
+				}
 				continue
 			}
 
@@ -762,6 +781,25 @@ func deduplicateToolResults(toolResults []map[string]interface{}) []map[string]i
 		}
 	}
 	return unique
+}
+
+// filterToolResults removes tool results whose toolUseId is in the filtered set.
+// This ensures tool_results without corresponding tool_uses are not sent to Kiro API.
+func filterToolResults(toolResults []map[string]interface{}, filteredIDs map[string]bool) []map[string]interface{} {
+	if len(filteredIDs) == 0 {
+		return toolResults
+	}
+	filtered := make([]map[string]interface{}, 0, len(toolResults))
+	for _, tr := range toolResults {
+		if id, ok := tr["toolUseId"].(string); ok {
+			if filteredIDs[id] {
+				// Skip this tool result - its corresponding tool_use was filtered
+				continue
+			}
+		}
+		filtered = append(filtered, tr)
+	}
+	return filtered
 }
 
 // extractTextContent extracts text content from Claude message content.
