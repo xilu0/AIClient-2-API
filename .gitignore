@@ -1,6 +1,6 @@
 node_modules
 .serena/
-.claude/
+.claude/*
 !.claude/skills/
 CLAUDE.md
 config.json
