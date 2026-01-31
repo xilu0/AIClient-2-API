@@ -23,7 +23,7 @@ services:
     container_name: aiclient2api
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "8080:3000"
       - "8085-8087:8085-8087"
       - "19876-19880:19876-19880"
     environment:
@@ -44,9 +44,7 @@ services:
       retries: 3
 
   go-kiro:
-    build:
-      context: ..
-      dockerfile: Dockerfile-go
+    image: heishui/aiclient-go-kiro:latest
     container_name: aiclient-go-kiro
     ports:
       - "8081:8081"
@@ -61,6 +59,7 @@ services:
       - GO_KIRO_LOG_LEVEL=info
       - GO_KIRO_LOG_JSON=true
       - GO_KIRO_HEALTH_COOLDOWN=60s
+      - GO_KIRO_DEBUG_DUMP=false
     depends_on:
       redis:
         condition: service_healthy
@@ -83,7 +82,7 @@ services:
     image: nginx:alpine
     container_name: aiclient-nginx
     ports:
-      - "80:80"
+      - "8082:80"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
     depends_on:
