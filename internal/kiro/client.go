@@ -670,10 +670,16 @@ func parseAssistantContent(content json.RawMessage) ParsedAssistantContent {
 			if len(block.Input) > 0 {
 				_ = json.Unmarshal(block.Input, &input)
 			}
-			// Kiro API requires input field to always be present
+
+			// Skip tool uses with empty input - Kiro API rejects them with "Improperly formed request"
+			// Empty input can be: nil, empty object {}, or empty map
 			if input == nil {
-				input = map[string]interface{}{}
+				continue
 			}
+			if inputMap, ok := input.(map[string]interface{}); ok && len(inputMap) == 0 {
+				continue
+			}
+
 			toolUse := map[string]interface{}{
 				"toolUseId": block.ID,
 				"name":      block.Name,
