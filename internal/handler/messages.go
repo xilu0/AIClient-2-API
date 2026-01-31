@@ -438,6 +438,7 @@ func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, ss
 					// Dump exception for debugging
 					if debugSession != nil {
 						debugSession.AppendKiroChunk(msg.Payload)
+						debugSession.SetExceptionPayload(msg.Payload)
 					}
 				}
 				continue
@@ -815,6 +816,7 @@ func (h *MessagesHandler) aggregateResponse(ctx context.Context, body io.Reader,
 					// Dump exception for debugging
 					if debugSession != nil {
 						debugSession.AppendKiroChunk(msg.Payload)
+						debugSession.SetExceptionPayload(msg.Payload)
 					}
 				}
 				continue

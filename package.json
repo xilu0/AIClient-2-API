@@ -51,6 +51,7 @@
     "sync:pools": "node src/cli/sync-provider-pools.js",
     "test:redis:stress": "node tests/redis-stress-test.js",
     "test:redis:benchmark": "node tests/redis-benchmark.js",
-    "test:tools-benchmark": "node tests/claude-tools-benchmark.js"
+    "test:tools-benchmark": "node tests/claude-tools-benchmark.js",
+    "analyze:dumps": "node .claude/skills/analyze-kiro-dumps.js"
   }
 }

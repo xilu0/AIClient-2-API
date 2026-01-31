@@ -29,17 +29,18 @@ type Dumper struct {
 
 // Metadata contains debug metadata for a request.
 type Metadata struct {
-	SessionID     string    `json:"session_id"`
-	RequestID     string    `json:"request_id,omitempty"`
-	AccountUUID   string    `json:"account_uuid,omitempty"`
-	Model         string    `json:"model,omitempty"`
-	StartTime     time.Time `json:"start_time"`
-	EndTime       time.Time `json:"end_time,omitempty"`
-	StatusCode    int       `json:"status_code,omitempty"`
-	Error         string    `json:"error,omitempty"`
-	ErrorType     string    `json:"error_type,omitempty"`
-	TriedAccounts []string  `json:"tried_accounts,omitempty"`
-	Success       bool      `json:"success"`
+	SessionID        string    `json:"session_id"`
+	RequestID        string    `json:"request_id,omitempty"`
+	AccountUUID      string    `json:"account_uuid,omitempty"`
+	Model            string    `json:"model,omitempty"`
+	StartTime        time.Time `json:"start_time"`
+	EndTime          time.Time `json:"end_time,omitempty"`
+	StatusCode       int       `json:"status_code,omitempty"`
+	Error            string    `json:"error,omitempty"`
+	ErrorType        string    `json:"error_type,omitempty"`
+	ExceptionPayload string    `json:"exception_payload,omitempty"` // Raw exception JSON from Kiro API
+	TriedAccounts    []string  `json:"tried_accounts,omitempty"`
+	Success          bool      `json:"success"`
 }
 
 // Session represents a debug session for a single request.
@@ -173,6 +174,16 @@ func (s *Session) SetErrorType(errType string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.metadata.ErrorType = errType
+}
+
+// SetExceptionPayload sets the raw exception payload from Kiro API.
+func (s *Session) SetExceptionPayload(payload []byte) {
+	if s == nil || len(payload) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.metadata.ExceptionPayload = string(payload)
 }
 
 // SetStatusCode sets the status code in metadata.

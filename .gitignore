@@ -1,6 +1,7 @@
 node_modules
 .serena/
 .claude/
+!.claude/skills/
 CLAUDE.md
 config.json
 provider_pools.json
@@ -25,3 +26,4 @@ vendor/
 coverage.out
 /kiro-server
 
+kiro-debug
