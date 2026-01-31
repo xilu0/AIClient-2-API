@@ -343,14 +343,19 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 		_ = h.poolManager.IncrementUsage(ctx, acc.UUID)
 
 		// Stream the response with estimated tokens
-		h.streamResponse(ctx, body, sseWriter, req.Model, estimatedInputTokens, acc.UUID, startTime, debugSession)
+		hasException := h.streamResponse(ctx, body, sseWriter, req.Model, estimatedInputTokens, acc.UUID, startTime, debugSession)
 		if err := body.Close(); err != nil {
 			h.logger.Warn("failed to close response body", "error", err)
 		}
 
-		// Mark debug session as success
+		// Mark debug session based on whether exception was received
 		if debugSession != nil {
-			debugSession.Success()
+			if hasException {
+				debugSession.SetErrorType("stream_exception")
+				debugSession.Fail(fmt.Errorf("received exception during streaming"))
+			} else {
+				debugSession.Success()
+			}
 		}
 		return
 	}
@@ -382,7 +387,9 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 }
 
 // streamResponse reads from Kiro and writes SSE events.
-func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, sseWriter *claude.SSEWriter, model string, estimatedInputTokens int, accountUUID string, startTime time.Time, debugSession *debug.Session) {
+// Returns true if an exception was received during streaming.
+func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, sseWriter *claude.SSEWriter, model string, estimatedInputTokens int, accountUUID string, startTime time.Time, debugSession *debug.Session) bool {
+	var exceptionReceived bool
 	// Use pooled parser to reduce GC pressure under high concurrency
 	parser := kiro.GetEventStreamParser()
 	defer kiro.ReleaseEventStreamParser(parser)
@@ -397,7 +404,7 @@ func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, ss
 		case <-ctx.Done():
 			// Send final events on context cancellation
 			h.sendFinalStreamEvents(sseWriter, converter, model, accountUUID, startTime)
-			return
+			return exceptionReceived
 		default:
 		}
 
@@ -409,7 +416,7 @@ func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, ss
 			} else {
 				h.logger.Error("error reading response", "error", err)
 			}
-			return
+			return exceptionReceived
 		}
 
 		if n == 0 {
@@ -427,6 +434,7 @@ func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, ss
 			if !msg.IsEvent() {
 				if msg.IsException() {
 					h.logger.Error("received exception", "payload", string(msg.Payload))
+					exceptionReceived = true
 					// Dump exception for debugging
 					if debugSession != nil {
 						debugSession.AppendKiroChunk(msg.Payload)
@@ -467,7 +475,7 @@ func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, ss
 
 				if err := sseWriter.WriteEvent(event.Type, event.Data); err != nil {
 					h.logger.Error("failed to write SSE event", "error", err)
-					return
+					return exceptionReceived
 				}
 			}
 		}
@@ -694,7 +702,7 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 		_ = h.poolManager.IncrementUsage(ctx, acc.UUID)
 
 		// Aggregate the response with estimated tokens
-		response := h.aggregateResponse(ctx, body, req.Model, estimatedInputTokens, acc.UUID, startTime, debugSession)
+		response, hasException := h.aggregateResponse(ctx, body, req.Model, estimatedInputTokens, acc.UUID, startTime, debugSession)
 		if err := body.Close(); err != nil {
 			h.logger.Warn("failed to close response body", "error", err)
 		}
@@ -708,9 +716,14 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 			return
 		}
 
-		// Mark debug session as success
+		// Mark debug session based on whether exception was received
 		if debugSession != nil {
-			debugSession.Success()
+			if hasException {
+				debugSession.SetErrorType("stream_exception")
+				debugSession.Fail(fmt.Errorf("received exception during streaming"))
+			} else {
+				debugSession.Success()
+			}
 		}
 
 		// Write JSON response with proper Content-Type
@@ -749,12 +762,14 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 }
 
 // aggregateResponse reads all chunks and builds a complete response.
-func (h *MessagesHandler) aggregateResponse(ctx context.Context, body io.Reader, model string, estimatedInputTokens int, accountUUID string, startTime time.Time, debugSession *debug.Session) *claude.MessageResponse {
+// Returns the response and a boolean indicating if an exception was received.
+func (h *MessagesHandler) aggregateResponse(ctx context.Context, body io.Reader, model string, estimatedInputTokens int, accountUUID string, startTime time.Time, debugSession *debug.Session) (*claude.MessageResponse, bool) {
 	// Use pooled parser to reduce GC pressure under high concurrency
 	parser := kiro.GetEventStreamParser()
 	defer kiro.ReleaseEventStreamParser(parser)
 
 	aggregator := claude.NewAggregatorWithEstimate(model, estimatedInputTokens)
+	var exceptionReceived bool
 
 	buf := make([]byte, 4096)
 
@@ -763,7 +778,7 @@ func (h *MessagesHandler) aggregateResponse(ctx context.Context, body io.Reader,
 		case <-ctx.Done():
 			resp := aggregator.Build()
 			h.logUsage(model, accountUUID, &resp.Usage, startTime)
-			return resp
+			return resp, exceptionReceived
 		default:
 		}
 
@@ -773,12 +788,12 @@ func (h *MessagesHandler) aggregateResponse(ctx context.Context, body io.Reader,
 				// End of stream, return aggregated response
 				resp := aggregator.Build()
 				h.logUsage(model, accountUUID, &resp.Usage, startTime)
-				return resp
+				return resp, exceptionReceived
 			}
 			h.logger.Error("error reading response", "error", err)
 			resp := aggregator.Build()
 			h.logUsage(model, accountUUID, &resp.Usage, startTime)
-			return resp
+			return resp, exceptionReceived
 		}
 
 		if n == 0 {
@@ -796,6 +811,7 @@ func (h *MessagesHandler) aggregateResponse(ctx context.Context, body io.Reader,
 			if !msg.IsEvent() {
 				if msg.IsException() {
 					h.logger.Error("received exception", "payload", string(msg.Payload))
+					exceptionReceived = true
 					// Dump exception for debugging
 					if debugSession != nil {
 						debugSession.AppendKiroChunk(msg.Payload)
