@@ -409,3 +409,13 @@ These must survive upstream merges in `src/providers/claude/claude-kiro.js`:
 ### Infrastructure
 - Redis 7.x Alpine (via Docker, with AOF persistence) — **required for provider pools**
 - Docker + Docker Compose (multi-service orchestration)
+
+## Testing Endpoints
+
+### Node.js Claude Kiro Endpoint
+- URL: `http://localhost:8080/claude-kiro-oauth/v1/messages`
+- Used for comparing Go Kiro implementation with Node.js reference
+
+### Go Kiro Endpoint
+- URL: `http://localhost:8081/v1/messages`
+- High-performance implementation
