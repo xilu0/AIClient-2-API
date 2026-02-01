@@ -52,43 +52,232 @@ const KIRO_CONSTANTS = {
 
 // Debug dump functionality (enabled via KIRO_DEBUG_DUMP=true environment variable)
 // Uses same base directory as Go service for easy comparison
-const KIRO_DEBUG_DIR = process.env.KIRO_DEBUG_DIR || '/app/kiro-debug';
+// Directory structure (matches Go service):
+//   - {baseDir}/success/{sessionID}/ - successful requests
+//   - {baseDir}/errors/{sessionID}/  - failed requests
+// Default: /tmp/kiro-debug (same as Go's DefaultDumpDir)
+const KIRO_DEBUG_DIR = process.env.KIRO_DEBUG_DIR || '/tmp/kiro-debug';
 
 /**
- * Check if debug dump is enabled (checked at runtime, not module load time)
+ * Check if debug dump is enabled (KIRO_DEBUG_DUMP=true)
  */
 function isDebugDumpEnabled() {
     return process.env.KIRO_DEBUG_DUMP === 'true';
 }
 
 /**
- * Dump Kiro request to file for debugging
- * @param {string} sessionId - Unique session ID
- * @param {Object} requestData - The Kiro request data
- * @param {Object} originalRequest - The original Claude API request
- * @param {Object} metadata - Additional metadata
+ * DebugSession - Manages debug dump for a single request
+ * Matches Go's debug.Session behavior
  */
+class DebugSession {
+    constructor(sessionId) {
+        this.sessionId = sessionId;
+        this.startTime = new Date();
+        this.dir = path.join(KIRO_DEBUG_DIR, 'temp', sessionId);
+        this.metadata = {
+            session_id: sessionId,
+            source: 'nodejs',
+            start_time: this.startTime.toISOString(),
+            tried_accounts: []
+        };
+        this.closed = false;
+        this._initialized = false;
+    }
+
+    async _ensureDir() {
+        if (!this._initialized) {
+            await fs.mkdir(this.dir, { recursive: true });
+            this._initialized = true;
+        }
+    }
+
+    setModel(model) {
+        this.metadata.model = model;
+    }
+
+    setAccountUUID(uuid) {
+        this.metadata.account_uuid = uuid;
+    }
+
+    addTriedAccount(uuid) {
+        if (!this.metadata.tried_accounts.includes(uuid)) {
+            this.metadata.tried_accounts.push(uuid);
+        }
+    }
+
+    setError(error) {
+        this.metadata.error = error instanceof Error ? error.message : String(error);
+    }
+
+    setErrorType(errType) {
+        this.metadata.error_type = errType;
+    }
+
+    setExceptionPayload(payload) {
+        this.metadata.exception_payload = typeof payload === 'string' ? payload : JSON.stringify(payload);
+    }
+
+    setStatusCode(code) {
+        this.metadata.status_code = code;
+    }
+
+    /**
+     * Dump the original Claude API request
+     */
+    async dumpRequest(requestData) {
+        if (this.closed) return;
+        try {
+            await this._ensureDir();
+            await fs.writeFile(
+                path.join(this.dir, 'request.json'),
+                JSON.stringify(requestData, null, 2)
+            );
+        } catch (err) {
+            console.error(`[Kiro Debug] Failed to dump request: ${err.message}`);
+        }
+    }
+
+    /**
+     * Dump the Kiro API request
+     */
+    async dumpKiroRequest(requestData) {
+        if (this.closed) return;
+        try {
+            await this._ensureDir();
+            await fs.writeFile(
+                path.join(this.dir, 'kiro_request.json'),
+                JSON.stringify(requestData, null, 2)
+            );
+        } catch (err) {
+            console.error(`[Kiro Debug] Failed to dump kiro request: ${err.message}`);
+        }
+    }
+
+    /**
+     * Append a Kiro chunk to kiro_chunks.jsonl
+     */
+    async appendKiroChunk(chunk) {
+        if (this.closed) return;
+        try {
+            await this._ensureDir();
+            const line = JSON.stringify(chunk) + '\n';
+            await fs.appendFile(path.join(this.dir, 'kiro_chunks.jsonl'), line);
+        } catch (err) {
+            // Silently ignore append errors to avoid disrupting the main flow
+        }
+    }
+
+    /**
+     * Append a Claude SSE event to claude_chunks.jsonl
+     */
+    async appendClaudeChunk(eventType, data) {
+        if (this.closed) return;
+        try {
+            await this._ensureDir();
+            const entry = { event: eventType, data };
+            const line = JSON.stringify(entry) + '\n';
+            await fs.appendFile(path.join(this.dir, 'claude_chunks.jsonl'), line);
+        } catch (err) {
+            // Silently ignore append errors to avoid disrupting the main flow
+        }
+    }
+
+    /**
+     * Mark session as successful and move to success/ directory
+     */
+    async success() {
+        if (this.closed) return;
+        this.closed = true;
+
+        this.metadata.end_time = new Date().toISOString();
+        this.metadata.success = true;
+
+        try {
+            await this._writeMetadata();
+            const destDir = path.join(KIRO_DEBUG_DIR, 'success', this.sessionId);
+            await fs.mkdir(path.dirname(destDir), { recursive: true });
+            await fs.rename(this.dir, destDir);
+            console.log(`[Kiro Debug] Session success: ${destDir}`);
+        } catch (err) {
+            console.error(`[Kiro Debug] Failed to finalize success session: ${err.message}`);
+        }
+    }
+
+    /**
+     * Mark session as failed and move to errors/ directory
+     */
+    async fail(error) {
+        if (this.closed) return;
+        this.closed = true;
+
+        this.metadata.end_time = new Date().toISOString();
+        this.metadata.success = false;
+        if (error) {
+            this.metadata.error = error instanceof Error ? error.message : String(error);
+        }
+
+        try {
+            // Always move to errors/ directory on failure
+            await this._writeMetadata();
+            const destDir = path.join(KIRO_DEBUG_DIR, 'errors', this.sessionId);
+            await fs.mkdir(path.dirname(destDir), { recursive: true });
+            await fs.rename(this.dir, destDir);
+            console.log(`[Kiro Debug] Session failed: ${destDir}`);
+        } catch (err) {
+            console.error(`[Kiro Debug] Failed to finalize error session: ${err.message}`);
+        }
+    }
+
+    async _writeMetadata() {
+        try {
+            await this._ensureDir();
+            await fs.writeFile(
+                path.join(this.dir, 'metadata.json'),
+                JSON.stringify(this.metadata, null, 2)
+            );
+        } catch (err) {
+            // Ignore metadata write errors
+        }
+    }
+
+    /**
+     * Close the session - defaults to failure if not explicitly marked
+     */
+    async close() {
+        if (this.closed) return;
+        await this.fail(new Error('session closed without explicit success/fail'));
+    }
+}
+
+/**
+ * Create a new debug session if debugging is enabled
+ * @returns {DebugSession|null}
+ */
+function createDebugSession(sessionId) {
+    if (!isDebugDumpEnabled()) {
+        return null;
+    }
+    return new DebugSession(sessionId);
+}
+
+// Legacy function for backward compatibility (deprecated)
 async function dumpKiroRequest(sessionId, requestData, originalRequest, metadata = {}) {
     if (!isDebugDumpEnabled()) return;
 
     try {
-        // Use 'nodejs' subdirectory to distinguish from Go dumps
         const dumpDir = path.join(KIRO_DEBUG_DIR, 'nodejs', sessionId);
         await fs.mkdir(dumpDir, { recursive: true });
 
-        // Dump Kiro request
         await fs.writeFile(
             path.join(dumpDir, 'kiro_request.json'),
             JSON.stringify(requestData, null, 2)
         );
 
-        // Dump original Claude request
         await fs.writeFile(
             path.join(dumpDir, 'request.json'),
             JSON.stringify(originalRequest, null, 2)
         );
 
-        // Dump metadata
         await fs.writeFile(
             path.join(dumpDir, 'metadata.json'),
             JSON.stringify({
@@ -1554,31 +1743,38 @@ export class KiroApiService {
 
         const requestData = this.buildCodewhispererRequest(messages, model, body.tools, body.system, body.thinking);
 
+        const sessionId = uuidv4();
+        const debugSession = createDebugSession(sessionId);
+        if (debugSession) {
+            debugSession.setModel(model);
+            debugSession.setAccountUUID(this.uuid);
+            await debugSession.dumpRequest(body);
+            await debugSession.dumpKiroRequest(requestData);
+        }
+
         try {
             const token = this.accessToken; // Use the already initialized token
-            const sessionId = uuidv4();
             const headers = {
                 'Authorization': `Bearer ${token}`,
                 'amz-sdk-invocation-id': sessionId,
             };
 
-            // Debug dump before sending request
-            await dumpKiroRequest(sessionId, requestData, body, {
-                model,
-                uuid: this.uuid,
-                authMethod: this.authMethod,
-                profileArn: this.profileArn,
-                region: this.region
-            });
-
-            // 当 model 以 kiro-amazonq 开头时，使用 amazonQUrl，否则使用 baseUrl
-            const requestUrl = model.startsWith('amazonq') ? this.amazonQUrl : this.baseUrl;
-            const response = await this.axiosInstance.post(requestUrl, requestData, { headers });
+            const response = await this.axiosInstance.post(this.baseUrl, requestData, { headers });
+            if (debugSession) await debugSession.success();
             return response;
         } catch (error) {
             const status = error.response?.status;
             const errorCode = error.code;
             const errorMessage = error.message || '';
+
+            // Record error info in debug session
+            if (debugSession) {
+                debugSession.setError(error);
+                debugSession.setStatusCode(status || 0);
+                if (error.response?.data) {
+                    debugSession.setExceptionPayload(error.response.data);
+                }
+            }
 
             // 检查是否为可重试的网络错误
             const isNetworkError = isRetryableNetworkError(error);
@@ -1599,11 +1795,13 @@ export class KiroApiService {
                 // Mark error for credential switch without recording error count
                 error.shouldSwitchCredential = true;
                 error.skipErrorCount = true;
+                if (debugSession) await debugSession.fail(error);
                 throw error;
             }
 
             // Handle 402 (Payment Required / Quota Exceeded) - verify usage and mark as unhealthy with recovery time
             if (status === 402 && !isRetry) {
+                if (debugSession) await debugSession.fail(error);
                 await this._handle402Error(error, 'callApi');
             }
 
@@ -1631,6 +1829,7 @@ export class KiroApiService {
                 // Mark error for credential switch without recording error count
                 error.shouldSwitchCredential = true;
                 error.skipErrorCount = true;
+                if (debugSession) await debugSession.fail(error);
                 throw error;
             }
 
@@ -1641,6 +1840,7 @@ export class KiroApiService {
                 // Mark error for credential switch without recording error count
                 error.shouldSwitchCredential = true;
                 error.skipErrorCount = true;
+                if (debugSession) await debugSession.fail(error);
                 throw error;
             }
 
@@ -1651,6 +1851,7 @@ export class KiroApiService {
                 // Mark error for credential switch without recording error count
                 error.shouldSwitchCredential = true;
                 error.skipErrorCount = true;
+                if (debugSession) await debugSession.fail(error);
                 throw error;
             }
 
@@ -1660,10 +1861,12 @@ export class KiroApiService {
                 const errorIdentifier = errorCode || errorMessage.substring(0, 50);
                 console.log(`[Kiro] Network error (${errorIdentifier}). Retrying in ${delay}ms... (attempt ${retryCount + 1}/${maxRetries})`);
                 await new Promise(resolve => setTimeout(resolve, delay));
+                // Don't mark session as failed yet - we're retrying
                 return this.callApi(method, model, body, isRetry, retryCount + 1);
             }
 
             console.error(`[Kiro] API call failed (Status: ${status}, Code: ${errorCode}):`, error.message);
+            if (debugSession) await debugSession.fail(error);
             throw error;
         }
     }
@@ -2038,8 +2241,14 @@ export class KiroApiService {
 
     /**
      * 真正的流式 API 调用 - 使用 responseType: 'stream'
+     * @param {string} method - HTTP method (unused, kept for compatibility)
+     * @param {string} model - Model name
+     * @param {Object} body - Request body
+     * @param {boolean} isRetry - Is this a retry attempt
+     * @param {number} retryCount - Current retry count
+     * @param {DebugSession} debugSession - Optional debug session for chunk recording
      */
-    async * streamApiReal(method, model, body, isRetry = false, retryCount = 0) {
+    async * streamApiReal(method, model, body, isRetry = false, retryCount = 0, debugSession = null) {
         if (!this.isInitialized) await this.initialize();
         const maxRetries = this.config.REQUEST_MAX_RETRIES || 3;
         const baseDelay = this.config.REQUEST_BASE_DELAY || 1000;
@@ -2065,16 +2274,16 @@ export class KiroApiService {
             'Authorization': `Bearer ${token}`,
             'amz-sdk-invocation-id': sessionId,
         };
-        const requestUrl = model.startsWith('amazonq') ? this.amazonQUrl : this.baseUrl;
+        const requestUrl = this.baseUrl;
 
-        // Debug dump before sending request
-        await dumpKiroRequest(sessionId, requestData, body, {
-            model,
-            uuid: this.uuid,
-            authMethod: this.authMethod,
-            profileArn: this.profileArn,
-            region: this.region
-        });
+        // Create or use provided debug session
+        const session = debugSession || createDebugSession(sessionId);
+        if (session) {
+            session.setModel(model);
+            session.setAccountUUID(this.uuid);
+            await session.dumpRequest(body);
+            await session.dumpKiroRequest(requestData);
+        }
 
         // 使用循环替代递归重试
         let currentRetryCount = retryCount;
@@ -2111,6 +2320,10 @@ export class KiroApiService {
                         bufferLen = remaining ? remaining.length : 0;
 
                         for (const event of events) {
+                            // Record Kiro chunk to debug session
+                            if (session) {
+                                session.appendKiroChunk(event.data || event);
+                            }
                             if (event.type === 'content' && event.data) {
                                 if (lastContentEvent === event.data) {
                                     continue;
@@ -2135,6 +2348,10 @@ export class KiroApiService {
                     const buffer = bufferParts.join('');
                     const { events } = this.parseAwsEventStreamBuffer(buffer);
                     for (const event of events) {
+                        // Record Kiro chunk to debug session
+                        if (session) {
+                            session.appendKiroChunk(event.data || event);
+                        }
                         if (event.type === 'content' && event.data) {
                             if (lastContentEvent === event.data) {
                                 continue;
@@ -2152,6 +2369,10 @@ export class KiroApiService {
                         }
                     }
                 }
+                // Mark debug session as successful
+                if (session) {
+                    await session.success();
+                }
                 return; // 成功完成，退出循环
             } catch (error) {
                 // 确保出错时关闭流
@@ -2164,10 +2385,20 @@ export class KiroApiService {
                 const errorMessage = error.message || '';
                 const isNetworkError = isRetryableNetworkError(error);
 
+                // Record error in debug session
+                if (session) {
+                    session.setError(error);
+                    session.setStatusCode(status || 0);
+                    if (error.response?.data) {
+                        session.setExceptionPayload(error.response.data);
+                    }
+                }
+
                 if (status === 403) {
                     this._markCredentialNeedRefresh('403 Forbidden', error);
                     error.shouldSwitchCredential = true;
                     error.skipErrorCount = true;
+                    if (session) await session.fail(error);
                     throw error;
                 }
 
@@ -2176,6 +2407,7 @@ export class KiroApiService {
                     await new Promise(resolve => setTimeout(resolve, baseDelay));
                     error.shouldSwitchCredential = true;
                     error.skipErrorCount = true;
+                    if (session) await session.fail(error);
                     throw error;
                 }
 
@@ -2184,6 +2416,7 @@ export class KiroApiService {
                     await new Promise(resolve => setTimeout(resolve, baseDelay));
                     error.shouldSwitchCredential = true;
                     error.skipErrorCount = true;
+                    if (session) await session.fail(error);
                     throw error;
                 }
 
@@ -2198,12 +2431,15 @@ export class KiroApiService {
                 }
 
                 console.error(`[Kiro] Stream API call failed (Status: ${status}, Code: ${errorCode}):`, error.message);
+                if (session) await session.fail(error);
                 throw error;
             }
         }
 
         // 如果循环自然退出（所有重试都用完），抛出明确的错误
-        throw new Error(`[Kiro] Stream API call failed after ${maxRetries} retries`);
+        const exhaustedError = new Error(`[Kiro] Stream API call failed after ${maxRetries} retries`);
+        if (session) await session.fail(exhaustedError);
+        throw exhaustedError;
     }
 
     // 保留旧的非流式方法用于 generateContent
@@ -2229,12 +2465,20 @@ export class KiroApiService {
         const finalModel = MODEL_MAPPING[model] ? model : this.modelName;
         console.log(`[Kiro] Calling generateContentStream with model: ${finalModel} (real streaming)`);
 
+        // Create debug session for this request
+        const sessionId = uuidv4();
+        const debugSession = createDebugSession(sessionId);
+        if (debugSession) {
+            debugSession.setModel(finalModel);
+            debugSession.setAccountUUID(this.uuid);
+        }
+
         let inputTokens = 0;
         let contextUsagePercentage = null;
         // 计算 token 分布（用于 usage 统计）
         const estimatedInputTokens = this.estimateInputTokens(requestBody);
         const { input_tokens: splitInputTokens, cache_creation_input_tokens, cache_read_input_tokens } = calculateKiroTokenDistribution(estimatedInputTokens);
-        const messageId = `${uuidv4()}`;
+        const messageId = `${sessionId}`;
 
         const thinkingRequested = requestBody?.thinking?.type === 'enabled';
 
@@ -2303,8 +2547,11 @@ export class KiroApiService {
             return events;
         };
 
-        function* pushEvents(events) {
+        function* pushEvents(events, session = null) {
             for (const ev of events) {
+                if (session) {
+                    session.appendClaudeChunk(ev.type, ev);
+                }
                 yield ev;
             }
         }
@@ -2342,8 +2589,16 @@ export class KiroApiService {
             const toolCalls = [];
             let currentToolCall = null; // 用于累积结构化工具调用
 
+            // Helper to record Claude event and yield
+            const yieldClaudeEvent = function* (event) {
+                if (debugSession) {
+                    debugSession.appendClaudeChunk(event.type, event);
+                }
+                yield event;
+            };
+
             // 1. 先发送 message_start 事件
-            yield {
+            const messageStartEvent = {
                 type: "message_start",
                 message: {
                     id: messageId,
@@ -2359,9 +2614,10 @@ export class KiroApiService {
                     content: []
                 }
             };
+            yield* yieldClaudeEvent(messageStartEvent);
 
             // 2. 流式接收并发送每个 content_block_delta
-            for await (const event of this.streamApiReal('', finalModel, requestBody)) {
+            for await (const event of this.streamApiReal('', finalModel, requestBody, false, 0, debugSession)) {
                 if (event.type === 'contextUsage' && event.contextUsagePercentage) {
                     // 捕获上下文使用百分比（包含输入和输出的总使用量）
                     contextUsagePercentage = event.contextUsagePercentage;
@@ -2369,7 +2625,7 @@ export class KiroApiService {
                     totalContentParts.push(event.content);
 
                     if (!thinkingRequested) {
-                        yield* pushEvents(createTextDeltaEvents(event.content));
+                        yield* pushEvents(createTextDeltaEvents(event.content), debugSession);
                         continue;
                     }
 
@@ -2470,7 +2726,7 @@ export class KiroApiService {
                         }
                     }
 
-                    yield* pushEvents(events);
+                    yield* pushEvents(events, debugSession);
                 } else if (event.type === 'toolUse') {
                     const tc = event.toolUse;
                     // 统计工具调用的内容到 totalContentParts（用于 token 计算）
@@ -2532,20 +2788,20 @@ export class KiroApiService {
             if (thinkingRequested && streamState.buffer) {
                 if (streamState.inThinking) {
                     console.warn('[Kiro] Incomplete thinking tag at stream end');
-                    yield* pushEvents(createThinkingDeltaEvents(streamState.buffer));
+                    yield* pushEvents(createThinkingDeltaEvents(streamState.buffer), debugSession);
                     streamState.buffer = '';
-                    yield* pushEvents(createThinkingDeltaEvents(""));
-                    yield* pushEvents(stopBlock(streamState.thinkingBlockIndex));
+                    yield* pushEvents(createThinkingDeltaEvents(""), debugSession);
+                    yield* pushEvents(stopBlock(streamState.thinkingBlockIndex), debugSession);
                 } else if (!streamState.thinkingExtracted) {
-                    yield* pushEvents(createTextDeltaEvents(streamState.buffer));
+                    yield* pushEvents(createTextDeltaEvents(streamState.buffer), debugSession);
                     streamState.buffer = '';
                 } else {
-                    yield* pushEvents(createTextDeltaEvents(streamState.buffer));
+                    yield* pushEvents(createTextDeltaEvents(streamState.buffer), debugSession);
                     streamState.buffer = '';
                 }
             }
 
-            yield* pushEvents(stopBlock(streamState.textBlockIndex));
+            yield* pushEvents(stopBlock(streamState.textBlockIndex), debugSession);
 
             // Join accumulated content parts (O(n) operation at end instead of O(n²) during accumulation)
             const totalContent = totalContentParts.join('');
@@ -2569,7 +2825,7 @@ export class KiroApiService {
                     const tc = toolCalls[i];
                     const blockIndex = baseIndex + i;
 
-                    yield {
+                    const toolStartEvent = {
                         type: "content_block_start",
                         index: blockIndex,
                         content_block: {
@@ -2579,8 +2835,10 @@ export class KiroApiService {
                             input: {}
                         }
                     };
+                    if (debugSession) debugSession.appendClaudeChunk(toolStartEvent.type, toolStartEvent);
+                    yield toolStartEvent;
 
-                    yield {
+                    const toolDeltaEvent = {
                         type: "content_block_delta",
                         index: blockIndex,
                         delta: {
@@ -2588,8 +2846,12 @@ export class KiroApiService {
                             partial_json: typeof tc.input === 'string' ? tc.input : JSON.stringify(tc.input || {})
                         }
                     };
+                    if (debugSession) debugSession.appendClaudeChunk(toolDeltaEvent.type, toolDeltaEvent);
+                    yield toolDeltaEvent;
 
-                    yield { type: "content_block_stop", index: blockIndex };
+                    const toolStopEvent = { type: "content_block_stop", index: blockIndex };
+                    if (debugSession) debugSession.appendClaudeChunk(toolStopEvent.type, toolStopEvent);
+                    yield toolStopEvent;
                 }
             }
 
@@ -2623,7 +2885,7 @@ export class KiroApiService {
             const finalDistribution = calculateKiroTokenDistribution(inputTokens);
 
             // 4. 发送 message_delta 事件
-            yield {
+            const messageDeltaEvent = {
                 type: "message_delta",
                 delta: { stop_reason: toolCalls.length > 0 ? "tool_use" : "end_turn" },
                 usage: {
@@ -2633,12 +2895,20 @@ export class KiroApiService {
                     cache_read_input_tokens: finalDistribution.cache_read_input_tokens
                 }
             };
+            if (debugSession) debugSession.appendClaudeChunk(messageDeltaEvent.type, messageDeltaEvent);
+            yield messageDeltaEvent;
 
             // 5. 发送 message_stop 事件
-            yield { type: "message_stop" };
+            const messageStopEvent = { type: "message_stop" };
+            if (debugSession) debugSession.appendClaudeChunk(messageStopEvent.type, messageStopEvent);
+            yield messageStopEvent;
+
+            // Mark debug session as successful
+            if (debugSession) await debugSession.success();
 
         } catch (error) {
             console.error('[Kiro] Error in streaming generation:', error);
+            if (debugSession) await debugSession.fail(error);
             throw new Error(`Error processing response: ${error.message}`);
         }
     }
