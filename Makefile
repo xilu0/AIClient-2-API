@@ -35,3 +35,9 @@ start-js:
 
 goreplay:
 	gor --input-raw eth0:8080 --output-file docs/goreplay/requests.gor
+
+get-dump:
+	docker cp aiclient-go-kiro:/tmp/kiro-debug ./
+
+get-dump-js:
+	docker cp aiclient2api:/app/kiro-debug/nodejs kiro-debug
