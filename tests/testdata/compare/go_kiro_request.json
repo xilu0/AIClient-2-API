@@ -1,0 +1,3813 @@
+{
+  "conversationState": {
+    "chatTriggerType": "MANUAL",
+    "conversationId": "3f0dafde-ce38-4f87-b29b-639e744ad811",
+    "currentMessage": {
+      "userInputMessage": {
+        "content": "我需要理解 species/data/species_taxonomy.json 的数据结构，特别是：\n\n1. 查看实际的数据示例，了解不同分类层级（界、门、纲、目、科、属、种）的节点结构\n2. 找出一些\"种\"节点学名不完整的具体例子（只有种小名，缺少属名）\n3. 理解如何通过父节点的中文名来判断分类层级（例如：以\"属\"结尾的是属级节点）\n4. 查看现有的 is_species_node.py 脚本，了解如何判断\"种\"节点\n\n重点关注：\n- 如何识别\"属\"级别的节点（可能通过中文名以\"属\"结尾来判断）\n- 学名格式的规律（双名法应该是两个单词，如 \"Amblyseius eharai\"）\n- 树形结构的遍历方式\n\n请提供具体的代码示例和数据示例。",
+        "modelId": "CLAUDE_SONNET_4_5_20250929_V1_0",
+        "origin": "AI_EDITOR",
+        "userInputMessageContext": {
+          "tools": [
+            {
+              "toolSpecification": {
+                "description": "Executes a given bash command with optional timeout. Working directory persists between commands; shell state (everything else) does not. The shell environment is initialized from the user's profile (bash or zsh).\n\nIMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.\n\nBefore executing the command, please follow these steps:\n\n1. Directory Verification:\n   - If the command will create new directories or files, first use `ls` to verify the parent directory exists and is the correct location\n   - For example, before running \"mkdir foo/bar\", first use `ls foo` to check that \"foo\" exists and is the intended parent directory\n\n2. Command Execution:\n   - Always quote file paths that contain spaces with double quotes (e.g., cd \"path with spaces/file.txt\")\n   - Examples of proper quoting:\n     - cd \"/Users/name/My Documents\" (correct)\n     - cd /Users/name/My Documents (incorrect - will fail)\n     - python \"/path/with spaces/script.py\" (correct)\n     - python /path/with spaces/script.py (incorrect - will fail)\n   - After ensuring proper quoting, execute the command.\n   - Capture the output of the command.\n\nUsage notes:\n  - The command argument is required.\n  - You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). If not specified, commands will timeout after 120000ms (2 minutes).\n  - It is very helpful if you write a clear, concise description of what this command does. For simple commands, keep it brief (5-10 words). For complex commands (piped commands, obscure flags, or anything hard to understand at a glance), add enough context to clarify what it does.\n  - If the output exceeds 30000 characters, output will be truncated before being returned to you.\n  \n  - You can use the `run_in_background` parameter to run the command in the background. Only use this if you don't need the result immediately and are OK being notified when the command completes later. You do not need to check the output right away - you'll be notified when it finishes. You do not need to use '\u0026' at the end of the command when using this parameter.\n  \n  - Avoid using Bash with the `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:\n    - File search: Use Glob (NOT find or ls)\n    - Content search: Use Grep (NOT grep or rg)\n    - Read files: Use Read (NOT cat/head/tail)\n    - Edit files: Use Edit (NOT sed/awk)\n    - Write files: Use Write (NOT echo \u003e/cat \u003c\u003cEOF)\n    - Communication: Output text directly (NOT echo/printf)\n  - When issuing multiple commands:\n    - If the commands are independent and can run in parallel, make multiple Bash tool calls in a single message. For example, if you need to run \"git status\" and \"git diff\", send a single message with two Bash tool calls in parallel.\n    - If the commands depend on each other and must run sequentially, use a single Bash call with '\u0026\u0026' to chain them together (e.g., `git add . \u0026\u0026 git commit -m \"message\" \u0026\u0026 git push`). For instance, if one operation must complete before another starts (like mkdir before cp, Write before Bash for git operations, or git add before git commit), run these operations sequentially instead.\n    - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail\n    - DO NOT use newlines to separate commands (newlines are ok in quoted strings)\n  - Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of `cd`. You may use `cd` if the User explicitly requests it.\n    \u003cgood-example\u003e\n    pytest /foo/bar/tests\n    \u003c/good-example\u003e\n    \u003cbad-example\u003e\n    cd /foo/bar \u0026\u0026 pytest tests\n    \u003c/bad-example\u003e\n\n# Committing changes with git\n\nOnly create commits when requested by the user. If unclear, ask first. When the user asks you to create a new git commit, follow these steps carefully:\n\nGit Safety Protocol:\n- NEVER update the git config\n- NEVER run destructive git commands (push --force, reset --hard, checkout ., restore ., clean -f, branch -D) unless the user explicitly requests these actions. Taking unauthorized destructive actions is unhelpful and can result in lost work, so it's best to ONLY run these commands when given direct instructions \n- NEVER skip hooks (--no-verify, --no-gpg-sign, etc) unless the user explicitly requests it\n- NEVER run force push to main/master, warn the user if they request it\n- CRITICAL: Always create NEW commits rather than amending, unless the user explicitly requests a git amend. When a pre-commit hook fails, the commit did NOT happen  — so --amend would modify the PREVIOUS commit, which may result in destroying work or losing previous changes. Instead, after hook failure, fix the issue, re-stage, and create a NEW commit\n- When staging files, prefer adding specific files by name rather than using \"git add -A\" or \"git add .\", which can accidentally include sensitive files (.env, credentials) or large binaries\n- NEVER commit changes unless the user explicitly asks you to. It is VERY IMPORTANT to only commit when explicitly asked, otherwise the user will feel that you are being too proactive\n\n1. You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, run multiple tool calls in parallel for optimal performance. run the following bash commands in parallel, each using the Bash tool:\n  - Run a git status command to see all untracked files. IMPORTANT: Never use the -uall flag as it can cause memory issues on large repos.\n  - Run a git diff command to see both staged and unstaged changes that will be committed.\n  - Run a git log command to see recent commit messages, so that you can follow this repository's commit message style.\n2. Analyze all staged changes (both previously staged and newly added) and draft a commit message:\n  - Summarize the nature of the changes (eg. new feature, enhancement to an existing feature, bug fix, refactoring, test, docs, etc.). Ensure the message accurately reflects the changes and their purpose (i.e. \"add\" means a wholly new feature, \"update\" means an enhancement to an existing feature, \"fix\" means a bug fix, etc.).\n  - Do not commit files that likely contain secrets (.env, credentials.json, etc). Warn the user if they specifically request to commit those files\n  - Draft a concise (1-2 sentences) commit message that focuses on the \"why\" rather than the \"what\"\n  - Ensure it accurately reflects the changes and their purpose\n3. You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, run multiple tool calls in parallel for optimal performance. run the following commands:\n   - Add relevant untracked files to the staging area.\n   - Create the commit with a message ending with:\n   Co-Authored-By: Claude Sonnet 4.5 \u003cnoreply@anthropic.com\u003e\n   - Run git status after the commit completes to verify success.\n   Note: git status depends on the commit completing, so run it sequentially after the commit.\n4. If the commit fails due to pre-commit hook: fix the issue and create a NEW commit\n\nImportant notes:\n- NEVER run additional commands to read or explore code, besides git bash commands\n- NEVER use the TodoWrite or Task tools\n- DO NOT push to the remote repository unless the user explicitly asks you to do so\n- IMPORTANT: Never use git commands with the -i flag (like git rebase -i or git add -i) since they require interactive input which is not supported.\n- IMPORTANT: Do not use --no-edit with git rebase commands, as the --no-edit flag is not a valid option for git rebase.\n- If there are no changes to commit (i.e., no untracked files and no modifications), do not create an empty commit\n- In order to ensure good formatting, ALWAYS pass the commit message via a HEREDOC, a la this example:\n\u003cexample\u003e\ngit commit -m \"$(cat \u003c\u003c'EOF'\n   Commit message here.\n\n   Co-Authored-By: Claude Sonnet 4.5 \u003cnoreply@anthropic.com\u003e\n   EOF\n   )\"\n\u003c/example\u003e\n\n# Creating pull requests\nUse the gh command via the Bash tool for ALL GitHub-related tasks including working with issues, pull requests, checks, and releases. If given a Github URL use the gh command to get the information needed.\n\nIMPORTANT: When the user asks you to create a pull request, follow these steps carefully:\n\n1. You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, run multiple tool calls in parallel for optimal performance. run the following bash commands in parallel using the Bash tool, in order to understand the current state of the branch since it diverged from the main branch:\n   - Run a git status command to see all untracked files (never use -uall flag)\n   - Run a git diff command to see both staged and unstaged changes that will be committed\n   - Check if the current branch tracks a remote branch and is...",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "additionalProperties": false,
+                    "properties": {
+                      "_simulatedSedEdit": {
+                        "additionalProperties": false,
+                        "description": "Internal: pre-computed sed edit result from preview",
+                        "properties": {
+                          "filePath": {
+                            "type": "string"
+                          },
+                          "newContent": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "filePath",
+                          "newContent"
+                        ],
+                        "type": "object"
+                      },
+                      "command": {
+                        "description": "The command to execute",
+                        "type": "string"
+                      },
+                      "dangerouslyDisableSandbox": {
+                        "description": "Set this to true to dangerously override sandbox mode and run commands without sandboxing.",
+                        "type": "boolean"
+                      },
+                      "description": {
+                        "description": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" or \"risk\" in the description - just describe what it does.\n\nFor simple commands (git, npm, standard CLI tools), keep it brief (5-10 words):\n- ls → \"List files in current directory\"\n- git status → \"Show working tree status\"\n- npm install → \"Install package dependencies\"\n\nFor commands that are harder to parse at a glance (piped commands, obscure flags, etc.), add enough context to clarify what it does:\n- find . -name \"*.tmp\" -exec rm {} \\; → \"Find and delete all .tmp files recursively\"\n- git reset --hard origin/main → \"Discard all local changes and match remote main\"\n- curl -s url | jq '.data[]' → \"Fetch JSON from URL and extract data array elements\"",
+                        "type": "string"
+                      },
+                      "run_in_background": {
+                        "description": "Set to true to run this command in the background. Use TaskOutput to read the output later.",
+                        "type": "boolean"
+                      },
+                      "timeout": {
+                        "description": "Optional timeout in milliseconds (max 600000)",
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "command"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "Bash"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "- Fast file pattern matching tool that works with any codebase size\n- Supports glob patterns like \"**/*.js\" or \"src/**/*.ts\"\n- Returns matching file paths sorted by modification time\n- Use this tool when you need to find files by name patterns\n- When you are doing an open ended search that may require multiple rounds of globbing and grepping, use the Agent tool instead\n- You can call multiple tools in a single response. It is always better to speculatively perform multiple searches in parallel if they are potentially useful.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "additionalProperties": false,
+                    "properties": {
+                      "path": {
+                        "description": "The directory to search in. If not specified, the current working directory will be used. IMPORTANT: Omit this field to use the default directory. DO NOT enter \"undefined\" or \"null\" - simply omit it for the default behavior. Must be a valid directory path if provided.",
+                        "type": "string"
+                      },
+                      "pattern": {
+                        "description": "The glob pattern to match files against",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "pattern"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "Glob"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "A powerful search tool built on ripgrep\n\n  Usage:\n  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.\n  - Supports full regex syntax (e.g., \"log.*Error\", \"function\\s+\\w+\")\n  - Filter files with glob parameter (e.g., \"*.js\", \"**/*.tsx\") or type parameter (e.g., \"js\", \"py\", \"rust\")\n  - Output modes: \"content\" shows matching lines, \"files_with_matches\" shows only file paths (default), \"count\" shows match counts\n  - Use Task tool for open-ended searches requiring multiple rounds\n  - Pattern syntax: Uses ripgrep (not grep) - literal braces need escaping (use `interface\\{\\}` to find `interface{}` in Go code)\n  - Multiline matching: By default patterns match within single lines only. For cross-line patterns like `struct \\{[\\s\\S]*?field`, use `multiline: true`\n",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "additionalProperties": false,
+                    "properties": {
+                      "-A": {
+                        "description": "Number of lines to show after each match (rg -A). Requires output_mode: \"content\", ignored otherwise.",
+                        "type": "number"
+                      },
+                      "-B": {
+                        "description": "Number of lines to show before each match (rg -B). Requires output_mode: \"content\", ignored otherwise.",
+                        "type": "number"
+                      },
+                      "-C": {
+                        "description": "Alias for context.",
+                        "type": "number"
+                      },
+                      "-i": {
+                        "description": "Case insensitive search (rg -i)",
+                        "type": "boolean"
+                      },
+                      "-n": {
+                        "description": "Show line numbers in output (rg -n). Requires output_mode: \"content\", ignored otherwise. Defaults to true.",
+                        "type": "boolean"
+                      },
+                      "context": {
+                        "description": "Number of lines to show before and after each match (rg -C). Requires output_mode: \"content\", ignored otherwise.",
+                        "type": "number"
+                      },
+                      "glob": {
+                        "description": "Glob pattern to filter files (e.g. \"*.js\", \"*.{ts,tsx}\") - maps to rg --glob",
+                        "type": "string"
+                      },
+                      "head_limit": {
+                        "description": "Limit output to first N lines/entries, equivalent to \"| head -N\". Works across all output modes: content (limits output lines), files_with_matches (limits file paths), count (limits count entries). Defaults to 0 (unlimited).",
+                        "type": "number"
+                      },
+                      "multiline": {
+                        "description": "Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall). Default: false.",
+                        "type": "boolean"
+                      },
+                      "offset": {
+                        "description": "Skip first N lines/entries before applying head_limit, equivalent to \"| tail -n +N | head -N\". Works across all output modes. Defaults to 0.",
+                        "type": "number"
+                      },
+                      "output_mode": {
+                        "description": "Output mode: \"content\" shows matching lines (supports -A/-B/-C context, -n line numbers, head_limit), \"files_with_matches\" shows file paths (supports head_limit), \"count\" shows match counts (supports head_limit). Defaults to \"files_with_matches\".",
+                        "enum": [
+                          "content",
+                          "files_with_matches",
+                          "count"
+                        ],
+                        "type": "string"
+                      },
+                      "path": {
+                        "description": "File or directory to search in (rg PATH). Defaults to current working directory.",
+                        "type": "string"
+                      },
+                      "pattern": {
+                        "description": "The regular expression pattern to search for in file contents",
+                        "type": "string"
+                      },
+                      "type": {
+                        "description": "File type to search (rg --type). Common types: js, py, rust, go, java, etc. More efficient than include for standard file types.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "pattern"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "Grep"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Reads a file from the local filesystem. You can access any file directly by using this tool.\nAssume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.\n\nUsage:\n- The file_path parameter must be an absolute path, not a relative path\n- By default, it reads up to 2000 lines starting from the beginning of the file\n- You can optionally specify a line offset and limit (especially handy for long files), but it's recommended to read the whole file by not providing these parameters\n- Any lines longer than 2000 characters will be truncated\n- Results are returned using cat -n format, with line numbers starting at 1\n- This tool allows Claude Code to read images (eg PNG, JPG, etc). When reading an image file the contents are presented visually as Claude Code is a multimodal LLM.\n- This tool can read PDF files (.pdf). PDFs are processed page by page, extracting both text and visual content for analysis.\n- This tool can read Jupyter notebooks (.ipynb files) and returns all cells with their outputs, combining code, text, and visualizations.\n- This tool can only read files, not directories. To read a directory, use an ls command via the Bash tool.\n- You can call multiple tools in a single response. It is always better to speculatively read multiple potentially useful files in parallel.\n- You will regularly be asked to read screenshots. If the user provides a path to a screenshot, ALWAYS use this tool to view the file at the path. This tool will work with all temporary file paths.\n- If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "additionalProperties": false,
+                    "properties": {
+                      "file_path": {
+                        "description": "The absolute path to the file to read",
+                        "type": "string"
+                      },
+                      "limit": {
+                        "description": "The number of lines to read. Only provide if the file is too large to read at once.",
+                        "type": "number"
+                      },
+                      "offset": {
+                        "description": "The line number to start reading from. Only provide if the file is too large to read at once",
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "file_path"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "Read"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "IMPORTANT: WebFetch WILL FAIL for authenticated or private URLs. Before using this tool, check if the URL points to an authenticated service (e.g. Google Docs, Confluence, Jira, GitHub). If so, you MUST use ToolSearch first to find a specialized tool that provides authenticated access.\n\n- Fetches content from a specified URL and processes it using an AI model\n- Takes a URL and a prompt as input\n- Fetches the URL content, converts HTML to markdown\n- Processes the content with the prompt using a small, fast model\n- Returns the model's response about the content\n- Use this tool when you need to retrieve and analyze web content\n\nUsage notes:\n  - IMPORTANT: If an MCP-provided web fetch tool is available, prefer using that tool instead of this one, as it may have fewer restrictions.\n  - The URL must be a fully-formed valid URL\n  - HTTP URLs will be automatically upgraded to HTTPS\n  - The prompt should describe what information you want to extract from the page\n  - This tool is read-only and does not modify any files\n  - Results may be summarized if the content is very large\n  - Includes a self-cleaning 15-minute cache for faster responses when repeatedly accessing the same URL\n  - When a URL redirects to a different host, the tool will inform you and provide the redirect URL in a special format. You should then make a new WebFetch request with the redirect URL to fetch the content.\n  - For GitHub URLs, prefer using the gh CLI via Bash instead (e.g., gh pr view, gh issue view, gh api).\n",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "additionalProperties": false,
+                    "properties": {
+                      "prompt": {
+                        "description": "The prompt to run on the fetched content",
+                        "type": "string"
+                      },
+                      "url": {
+                        "description": "The URL to fetch content from",
+                        "format": "uri",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "url",
+                      "prompt"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "WebFetch"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Execute a skill within the main conversation\n\nWhen users ask you to perform tasks, check if any of the available skills match. Skills provide specialized capabilities and domain knowledge.\n\nWhen users reference a \"slash command\" or \"/\u003csomething\u003e\" (e.g., \"/commit\", \"/review-pr\"), they are referring to a skill. Use this tool to invoke it.\n\nHow to invoke:\n- Use this tool with the skill name and optional arguments\n- Examples:\n  - `skill: \"pdf\"` - invoke the pdf skill\n  - `skill: \"commit\", args: \"-m 'Fix bug'\"` - invoke with arguments\n  - `skill: \"review-pr\", args: \"123\"` - invoke with arguments\n  - `skill: \"ms-office-suite:pdf\"` - invoke using fully qualified name\n\nImportant:\n- Available skills are listed in system-reminder messages in the conversation\n- When a skill matches the user's request, this is a BLOCKING REQUIREMENT: invoke the relevant Skill tool BEFORE generating any other response about the task\n- NEVER mention a skill without actually calling this tool\n- Do not invoke a skill that is already running\n- Do not use this tool for built-in CLI commands (like /help, /clear, etc.)\n- If you see a \u003ccommand-name\u003e tag in the current conversation turn, the skill has ALREADY been loaded - follow the instructions directly instead of calling this tool again\n",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "additionalProperties": false,
+                    "properties": {
+                      "args": {
+                        "description": "Optional arguments for the skill",
+                        "type": "string"
+                      },
+                      "skill": {
+                        "description": "The skill name. E.g., \"commit\", \"review-pr\", or \"pdf\"",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "skill"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "Skill"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Use this tool to create a structured task list for your current coding session. This helps you track progress, organize complex tasks, and demonstrate thoroughness to the user.\nIt also helps the user understand the progress of the task and overall progress of their requests.\n\n## When to Use This Tool\n\nUse this tool proactively in these scenarios:\n\n- Complex multi-step tasks - When a task requires 3 or more distinct steps or actions\n- Non-trivial and complex tasks - Tasks that require careful planning or multiple operations\n- Plan mode - When using plan mode, create a task list to track the work\n- User explicitly requests todo list - When the user directly asks you to use the todo list\n- User provides multiple tasks - When users provide a list of things to be done (numbered or comma-separated)\n- After receiving new instructions - Immediately capture user requirements as tasks\n- When you start working on a task - Mark it as in_progress BEFORE beginning work\n- After completing a task - Mark it as completed and add any new follow-up tasks discovered during implementation\n\n## When NOT to Use This Tool\n\nSkip using this tool when:\n- There is only a single, straightforward task\n- The task is trivial and tracking it provides no organizational benefit\n- The task can be completed in less than 3 trivial steps\n- The task is purely conversational or informational\n\nNOTE that you should not use this tool if there is only one trivial task to do. In this case you are better off just doing the task directly.\n\n## Task Fields\n\n- **subject**: A brief, actionable title in imperative form (e.g., \"Fix authentication bug in login flow\")\n- **description**: Detailed description of what needs to be done, including context and acceptance criteria\n- **activeForm**: Present continuous form shown in spinner when task is in_progress (e.g., \"Fixing authentication bug\"). This is displayed to the user while you work on the task.\n\n**IMPORTANT**: Always provide activeForm when creating tasks. The subject should be imperative (\"Run tests\") while activeForm should be present continuous (\"Running tests\"). All tasks are created with status `pending`.\n\n## Tips\n\n- Create tasks with clear, specific subjects that describe the outcome\n- Include enough detail in the description for another agent to understand and complete the task\n- After creating tasks, use TaskUpdate to set up dependencies (blocks/blockedBy) if needed\n- Check TaskList first to avoid creating duplicate tasks\n",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "additionalProperties": false,
+                    "properties": {
+                      "activeForm": {
+                        "description": "Present continuous form shown in spinner when in_progress (e.g., \"Running tests\")",
+                        "type": "string"
+                      },
+                      "description": {
+                        "description": "A detailed description of what needs to be done",
+                        "type": "string"
+                      },
+                      "metadata": {
+                        "additionalProperties": {},
+                        "description": "Arbitrary metadata to attach to the task",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "type": "object"
+                      },
+                      "subject": {
+                        "description": "A brief title for the task",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "subject",
+                      "description"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "TaskCreate"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Use this tool to retrieve a task by its ID from the task list.\n\n## When to Use This Tool\n\n- When you need the full description and context before starting work on a task\n- To understand task dependencies (what it blocks, what blocks it)\n- After being assigned a task, to get complete requirements\n\n## Output\n\nReturns full task details:\n- **subject**: Task title\n- **description**: Detailed requirements and context\n- **status**: 'pending', 'in_progress', or 'completed'\n- **blocks**: Tasks waiting on this one to complete\n- **blockedBy**: Tasks that must complete before this one can start\n\n## Tips\n\n- After fetching a task, verify its blockedBy list is empty before beginning work.\n- Use TaskList to see all tasks in summary form.\n",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "additionalProperties": false,
+                    "properties": {
+                      "taskId": {
+                        "description": "The ID of the task to retrieve",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "taskId"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "TaskGet"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Use this tool to update a task in the task list.\n\n## When to Use This Tool\n\n**Mark tasks as resolved:**\n- When you have completed the work described in a task\n- When a task is no longer needed or has been superseded\n- IMPORTANT: Always mark your assigned tasks as resolved when you finish them\n- After resolving, call TaskList to find your next task\n\n- ONLY mark a task as completed when you have FULLY accomplished it\n- If you encounter errors, blockers, or cannot finish, keep the task as in_progress\n- When blocked, create a new task describing what needs to be resolved\n- Never mark a task as completed if:\n  - Tests are failing\n  - Implementation is partial\n  - You encountered unresolved errors\n  - You couldn't find necessary files or dependencies\n\n**Delete tasks:**\n- When a task is no longer relevant or was created in error\n- Setting status to `deleted` permanently removes the task\n\n**Update task details:**\n- When requirements change or become clearer\n- When establishing dependencies between tasks\n\n## Fields You Can Update\n\n- **status**: The task status (see Status Workflow below)\n- **subject**: Change the task title (imperative form, e.g., \"Run tests\")\n- **description**: Change the task description\n- **activeForm**: Present continuous form shown in spinner when in_progress (e.g., \"Running tests\")\n- **owner**: Change the task owner (agent name)\n- **metadata**: Merge metadata keys into the task (set a key to null to delete it)\n- **addBlocks**: Mark tasks that cannot start until this one completes\n- **addBlockedBy**: Mark tasks that must complete before this one can start\n\n## Status Workflow\n\nStatus progresses: `pending` → `in_progress` → `completed`\n\nUse `deleted` to permanently remove a task.\n\n## Staleness\n\nMake sure to read a task's latest state using `TaskGet` before updating it.\n\n## Examples\n\nMark task as in progress when starting work:\n```json\n{\"taskId\": \"1\", \"status\": \"in_progress\"}\n```\n\nMark task as completed after finishing work:\n```json\n{\"taskId\": \"1\", \"status\": \"completed\"}\n```\n\nDelete a task:\n```json\n{\"taskId\": \"1\", \"status\": \"deleted\"}\n```\n\nClaim a task by setting owner:\n```json\n{\"taskId\": \"1\", \"owner\": \"my-name\"}\n```\n\nSet up task dependencies:\n```json\n{\"taskId\": \"2\", \"addBlockedBy\": [\"1\"]}\n```\n",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "additionalProperties": false,
+                    "properties": {
+                      "activeForm": {
+                        "description": "Present continuous form shown in spinner when in_progress (e.g., \"Running tests\")",
+                        "type": "string"
+                      },
+                      "addBlockedBy": {
+                        "description": "Task IDs that block this task",
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "addBlocks": {
+                        "description": "Task IDs that this task blocks",
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "description": {
+                        "description": "New description for the task",
+                        "type": "string"
+                      },
+                      "metadata": {
+                        "additionalProperties": {},
+                        "description": "Metadata keys to merge into the task. Set a key to null to delete it.",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "type": "object"
+                      },
+                      "owner": {
+                        "description": "New owner for the task",
+                        "type": "string"
+                      },
+                      "status": {
+                        "anyOf": [
+                          {
+                            "enum": [
+                              "pending",
+                              "in_progress",
+                              "completed"
+                            ],
+                            "type": "string"
+                          },
+                          {
+                            "const": "deleted",
+                            "type": "string"
+                          }
+                        ],
+                        "description": "New status for the task"
+                      },
+                      "subject": {
+                        "description": "New subject for the task",
+                        "type": "string"
+                      },
+                      "taskId": {
+                        "description": "The ID of the task to update",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "taskId"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "TaskUpdate"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Use this tool to list all tasks in the task list.\n\n## When to Use This Tool\n\n- To see what tasks are available to work on (status: 'pending', no owner, not blocked)\n- To check overall progress on the project\n- To find tasks that are blocked and need dependencies resolved\n- After completing a task, to check for newly unblocked work or claim the next available task\n- **Prefer working on tasks in ID order** (lowest ID first) when multiple tasks are available, as earlier tasks often set up context for later ones\n\n## Output\n\nReturns a summary of each task:\n- **id**: Task identifier (use with TaskGet, TaskUpdate)\n- **subject**: Brief description of the task\n- **status**: 'pending', 'in_progress', or 'completed'\n- **owner**: Agent ID if assigned, empty if available\n- **blockedBy**: List of open task IDs that must be resolved first (tasks with blockedBy cannot be claimed until dependencies resolve)\n\nUse TaskGet with a specific task ID to view full details including description and comments.\n",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "https://json-schema.org/draft/2020-12/schema",
+                    "additionalProperties": false,
+                    "properties": {},
+                    "type": "object"
+                  }
+                },
+                "name": "TaskList"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Resolves a package/product name to a Context7-compatible library ID and returns matching libraries.\n\nYou MUST call this function before 'query-docs' to obtain a valid Context7-compatible library ID UNLESS the user explicitly provides a library ID in the format '/org/project' or '/org/project/version' in their query.\n\nSelection Process:\n1. Analyze the query to understand what library/package the user is looking for\n2. Return the most relevant match based on:\n- Name similarity to the query (exact matches prioritized)\n- Description relevance to the query's intent\n- Documentation coverage (prioritize libraries with higher Code Snippet counts)\n- Source reputation (consider libraries with High or Medium reputation more authoritative)\n- Benchmark Score: Quality indicator (100 is the highest score)\n\nResponse Format:\n- Return the selected library ID in a clearly marked section\n- Provide a brief explanation for why this library was chosen\n- If multiple good matches exist, acknowledge this but proceed with the most relevant one\n- If no good matches exist, clearly state this and suggest query refinements\n\nFor ambiguous queries, request clarification before proceeding with a best-guess match.\n\nIMPORTANT: Do not call this tool more than 3 times per question. If you cannot find what you need after 3 calls, use the best result you have.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "properties": {
+                      "libraryName": {
+                        "description": "Library name to search for and retrieve a Context7-compatible library ID.",
+                        "type": "string"
+                      },
+                      "query": {
+                        "description": "The user's original question or task. This is used to rank library results by relevance to what the user is trying to accomplish. IMPORTANT: Do not include any sensitive or confidential information such as API keys, passwords, credentials, or personal data in your query.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "query",
+                      "libraryName"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__context7__resolve-library-id"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Retrieves and queries up-to-date documentation and code examples from Context7 for any programming library or framework.\n\nYou must call 'resolve-library-id' first to obtain the exact Context7-compatible library ID required to use this tool, UNLESS the user explicitly provides a library ID in the format '/org/project' or '/org/project/version' in their query.\n\nIMPORTANT: Do not call this tool more than 3 times per question. If you cannot find what you need after 3 calls, use the best information you have.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "properties": {
+                      "libraryId": {
+                        "description": "Exact Context7-compatible library ID (e.g., '/mongodb/docs', '/vercel/next.js', '/supabase/supabase', '/vercel/next.js/v14.3.0-canary.87') retrieved from 'resolve-library-id' or directly from user query in the format '/org/project' or '/org/project/version'.",
+                        "type": "string"
+                      },
+                      "query": {
+                        "description": "The question or task you need help with. Be specific and include relevant details. Good: 'How to set up authentication with JWT in Express.js' or 'React useEffect cleanup function examples'. Bad: 'auth' or 'hooks'. IMPORTANT: Do not include any sensitive or confidential information such as API keys, passwords, credentials, or personal data in your query.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "libraryId",
+                      "query"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__context7__query-docs"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Clicks on the provided element",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "dblClick": {
+                        "description": "Set to true for double clicks. Default is false.",
+                        "type": "boolean"
+                      },
+                      "includeSnapshot": {
+                        "description": "Whether to include a snapshot in the response. Default is false.",
+                        "type": "boolean"
+                      },
+                      "uid": {
+                        "description": "The uid of an element on the page from the page content snapshot",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "uid"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__click"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Closes the page by its index. The last open page cannot be closed.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "pageId": {
+                        "description": "The ID of the page to close. Call list_pages to list pages.",
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "pageId"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__close_page"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Drag an element onto another element",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "from_uid": {
+                        "description": "The uid of the element to drag",
+                        "type": "string"
+                      },
+                      "includeSnapshot": {
+                        "description": "Whether to include a snapshot in the response. Default is false.",
+                        "type": "boolean"
+                      },
+                      "to_uid": {
+                        "description": "The uid of the element to drop into",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "from_uid",
+                      "to_uid"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__drag"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Emulates various features on the selected page.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "colorScheme": {
+                        "description": "Emulate the dark or the light mode. Set to \"auto\" to reset to the default.",
+                        "enum": [
+                          "dark",
+                          "light",
+                          "auto"
+                        ],
+                        "type": "string"
+                      },
+                      "cpuThrottlingRate": {
+                        "description": "Represents the CPU slowdown factor. Set the rate to 1 to disable throttling. If omitted, throttling remains unchanged.",
+                        "maximum": 20,
+                        "minimum": 1,
+                        "type": "number"
+                      },
+                      "geolocation": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "latitude": {
+                                "description": "Latitude between -90 and 90.",
+                                "maximum": 90,
+                                "minimum": -90,
+                                "type": "number"
+                              },
+                              "longitude": {
+                                "description": "Longitude between -180 and 180.",
+                                "maximum": 180,
+                                "minimum": -180,
+                                "type": "number"
+                              }
+                            },
+                            "required": [
+                              "latitude",
+                              "longitude"
+                            ],
+                            "type": "object"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "description": "Geolocation to emulate. Set to null to clear the geolocation override."
+                      },
+                      "networkConditions": {
+                        "description": "Throttle network. Set to \"No emulation\" to disable. If omitted, conditions remain unchanged.",
+                        "enum": [
+                          "No emulation",
+                          "Offline",
+                          "Slow 3G",
+                          "Fast 3G",
+                          "Slow 4G",
+                          "Fast 4G"
+                        ],
+                        "type": "string"
+                      },
+                      "userAgent": {
+                        "description": "User agent to emulate. Set to null to clear the user agent override.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "viewport": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "deviceScaleFactor": {
+                                "description": "Specify device scale factor (can be thought of as dpr).",
+                                "minimum": 0,
+                                "type": "number"
+                              },
+                              "hasTouch": {
+                                "description": "Specifies if viewport supports touch events. This should be set to true for mobile devices.",
+                                "type": "boolean"
+                              },
+                              "height": {
+                                "description": "Page height in pixels.",
+                                "minimum": 0,
+                                "type": "integer"
+                              },
+                              "isLandscape": {
+                                "description": "Specifies if viewport is in landscape mode. Defaults to false.",
+                                "type": "boolean"
+                              },
+                              "isMobile": {
+                                "description": "Whether the meta viewport tag is taken into account. Defaults to false.",
+                                "type": "boolean"
+                              },
+                              "width": {
+                                "description": "Page width in pixels.",
+                                "minimum": 0,
+                                "type": "integer"
+                              }
+                            },
+                            "required": [
+                              "width",
+                              "height"
+                            ],
+                            "type": "object"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "description": "Viewport to emulate. Set to null to reset to the default viewport."
+                      }
+                    },
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__emulate"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Evaluate a JavaScript function inside the currently selected page. Returns the response as JSON\nso returned values have to JSON-serializable.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "args": {
+                        "description": "An optional list of arguments to pass to the function.",
+                        "items": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "uid": {
+                              "description": "The uid of an element on the page from the page content snapshot",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "uid"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "function": {
+                        "description": "A JavaScript function declaration to be executed by the tool in the currently selected page.\nExample without arguments: `() =\u003e {\n  return document.title\n}` or `async () =\u003e {\n  return await fetch(\"example.com\")\n}`.\nExample with arguments: `(el) =\u003e {\n  return el.innerText;\n}`\n",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "function"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__evaluate_script"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Type text into a input, text area or select an option from a \u003cselect\u003e element.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "includeSnapshot": {
+                        "description": "Whether to include a snapshot in the response. Default is false.",
+                        "type": "boolean"
+                      },
+                      "uid": {
+                        "description": "The uid of an element on the page from the page content snapshot",
+                        "type": "string"
+                      },
+                      "value": {
+                        "description": "The value to fill in",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "uid",
+                      "value"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__fill"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Fill out multiple form elements at once",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "elements": {
+                        "description": "Elements from snapshot to fill out.",
+                        "items": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "uid": {
+                              "description": "The uid of the element to fill out",
+                              "type": "string"
+                            },
+                            "value": {
+                              "description": "Value for the element",
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "uid",
+                            "value"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "includeSnapshot": {
+                        "description": "Whether to include a snapshot in the response. Default is false.",
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "elements"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__fill_form"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Gets a console message by its ID. You can get all messages by calling list_console_messages.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "msgid": {
+                        "description": "The msgid of a console message on the page from the listed console messages",
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "msgid"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__get_console_message"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Gets a network request by an optional reqid, if omitted returns the currently selected request in the DevTools Network panel.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "reqid": {
+                        "description": "The reqid of the network request. If omitted returns the currently selected request in the DevTools Network panel.",
+                        "type": "number"
+                      },
+                      "requestFilePath": {
+                        "description": "The absolute or relative path to save the request body to. If omitted, the body is returned inline.",
+                        "type": "string"
+                      },
+                      "responseFilePath": {
+                        "description": "The absolute or relative path to save the response body to. If omitted, the body is returned inline.",
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__get_network_request"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "If a browser dialog was opened, use this command to handle it",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "action": {
+                        "description": "Whether to dismiss or accept the dialog",
+                        "enum": [
+                          "accept",
+                          "dismiss"
+                        ],
+                        "type": "string"
+                      },
+                      "promptText": {
+                        "description": "Optional prompt text to enter into the dialog.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "action"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__handle_dialog"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Hover over the provided element",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "includeSnapshot": {
+                        "description": "Whether to include a snapshot in the response. Default is false.",
+                        "type": "boolean"
+                      },
+                      "uid": {
+                        "description": "The uid of an element on the page from the page content snapshot",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "uid"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__hover"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "List all console messages for the currently selected page since the last navigation.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "includePreservedMessages": {
+                        "default": false,
+                        "description": "Set to true to return the preserved messages over the last 3 navigations.",
+                        "type": "boolean"
+                      },
+                      "pageIdx": {
+                        "description": "Page number to return (0-based). When omitted, returns the first page.",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "pageSize": {
+                        "description": "Maximum number of messages to return. When omitted, returns all requests.",
+                        "exclusiveMinimum": 0,
+                        "type": "integer"
+                      },
+                      "types": {
+                        "description": "Filter messages to only return messages of the specified resource types. When omitted or empty, returns all messages.",
+                        "items": {
+                          "enum": [
+                            "log",
+                            "debug",
+                            "info",
+                            "error",
+                            "warn",
+                            "dir",
+                            "dirxml",
+                            "table",
+                            "trace",
+                            "clear",
+                            "startGroup",
+                            "startGroupCollapsed",
+                            "endGroup",
+                            "assert",
+                            "profile",
+                            "profileEnd",
+                            "count",
+                            "timeEnd",
+                            "verbose",
+                            "issue"
+                          ],
+                          "type": "string"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__list_console_messages"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "List all requests for the currently selected page since the last navigation.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "includePreservedRequests": {
+                        "default": false,
+                        "description": "Set to true to return the preserved requests over the last 3 navigations.",
+                        "type": "boolean"
+                      },
+                      "pageIdx": {
+                        "description": "Page number to return (0-based). When omitted, returns the first page.",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "pageSize": {
+                        "description": "Maximum number of requests to return. When omitted, returns all requests.",
+                        "exclusiveMinimum": 0,
+                        "type": "integer"
+                      },
+                      "resourceTypes": {
+                        "description": "Filter requests to only return requests of the specified resource types. When omitted or empty, returns all requests.",
+                        "items": {
+                          "enum": [
+                            "document",
+                            "stylesheet",
+                            "image",
+                            "media",
+                            "font",
+                            "script",
+                            "texttrack",
+                            "xhr",
+                            "fetch",
+                            "prefetch",
+                            "eventsource",
+                            "websocket",
+                            "manifest",
+                            "signedexchange",
+                            "ping",
+                            "cspviolationreport",
+                            "preflight",
+                            "fedcm",
+                            "other"
+                          ],
+                          "type": "string"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__list_network_requests"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Get a list of pages open in the browser.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "properties": {},
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__list_pages"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Navigates the currently selected page to a URL.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "handleBeforeUnload": {
+                        "description": "Whether to auto accept or beforeunload dialogs triggered by this navigation. Default is accept.",
+                        "enum": [
+                          "accept",
+                          "decline"
+                        ],
+                        "type": "string"
+                      },
+                      "ignoreCache": {
+                        "description": "Whether to ignore cache on reload.",
+                        "type": "boolean"
+                      },
+                      "initScript": {
+                        "description": "A JavaScript script to be executed on each new document before any other scripts for the next navigation.",
+                        "type": "string"
+                      },
+                      "timeout": {
+                        "description": "Maximum wait time in milliseconds. If set to 0, the default timeout will be used.",
+                        "type": "integer"
+                      },
+                      "type": {
+                        "description": "Navigate the page by URL, back or forward in history, or reload.",
+                        "enum": [
+                          "url",
+                          "back",
+                          "forward",
+                          "reload"
+                        ],
+                        "type": "string"
+                      },
+                      "url": {
+                        "description": "Target URL (only type=url)",
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__navigate_page"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Creates a new page",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "background": {
+                        "description": "Whether to open the page in the background without bringing it to the front. Default is false (foreground).",
+                        "type": "boolean"
+                      },
+                      "timeout": {
+                        "description": "Maximum wait time in milliseconds. If set to 0, the default timeout will be used.",
+                        "type": "integer"
+                      },
+                      "url": {
+                        "description": "URL to load in a new page.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "url"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__new_page"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Provides more detailed information on a specific Performance Insight of an insight set that was highlighted in the results of a trace recording.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "insightName": {
+                        "description": "The name of the Insight you want more information on. For example: \"DocumentLatency\" or \"LCPBreakdown\"",
+                        "type": "string"
+                      },
+                      "insightSetId": {
+                        "description": "The id for the specific insight set. Only use the ids given in the \"Available insight sets\" list.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "insightSetId",
+                      "insightName"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__performance_analyze_insight"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Starts a performance trace recording on the selected page. This can be used to look for performance problems and insights to improve the performance of the page. It will also report Core Web Vital (CWV) scores for the page.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "autoStop": {
+                        "description": "Determines if the trace recording should be automatically stopped.",
+                        "type": "boolean"
+                      },
+                      "filePath": {
+                        "description": "The absolute file path, or a file path relative to the current working directory, to save the raw trace data. For example, trace.json.gz (compressed) or trace.json (uncompressed).",
+                        "type": "string"
+                      },
+                      "reload": {
+                        "description": "Determines if, once tracing has started, the current selected page should be automatically reloaded. Navigate the page to the right URL using the navigate_page tool BEFORE starting the trace if reload or autoStop is set to true.",
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "reload",
+                      "autoStop"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__performance_start_trace"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Stops the active performance trace recording on the selected page.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "filePath": {
+                        "description": "The absolute file path, or a file path relative to the current working directory, to save the raw trace data. For example, trace.json.gz (compressed) or trace.json (uncompressed).",
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__performance_stop_trace"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Press a key or key combination. Use this when other input methods like fill() cannot be used (e.g., keyboard shortcuts, navigation keys, or special key combinations).",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "includeSnapshot": {
+                        "description": "Whether to include a snapshot in the response. Default is false.",
+                        "type": "boolean"
+                      },
+                      "key": {
+                        "description": "A key or a combination (e.g., \"Enter\", \"Control+A\", \"Control++\", \"Control+Shift+R\"). Modifiers: Control, Shift, Alt, Meta",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "key"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__press_key"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Resizes the selected page's window so that the page has specified dimension",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "height": {
+                        "description": "Page height",
+                        "type": "number"
+                      },
+                      "width": {
+                        "description": "Page width",
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "width",
+                      "height"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__resize_page"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Select a page as a context for future tool calls.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "bringToFront": {
+                        "description": "Whether to focus the page and bring it to the top.",
+                        "type": "boolean"
+                      },
+                      "pageId": {
+                        "description": "The ID of the page to select. Call list_pages to get available pages.",
+                        "type": "number"
+                      }
+                    },
+                    "required": [
+                      "pageId"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__select_page"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Take a screenshot of the page or element.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "filePath": {
+                        "description": "The absolute path, or a path relative to the current working directory, to save the screenshot to instead of attaching it to the response.",
+                        "type": "string"
+                      },
+                      "format": {
+                        "default": "png",
+                        "description": "Type of format to save the screenshot as. Default is \"png\"",
+                        "enum": [
+                          "png",
+                          "jpeg",
+                          "webp"
+                        ],
+                        "type": "string"
+                      },
+                      "fullPage": {
+                        "description": "If set to true takes a screenshot of the full page instead of the currently visible viewport. Incompatible with uid.",
+                        "type": "boolean"
+                      },
+                      "quality": {
+                        "description": "Compression quality for JPEG and WebP formats (0-100). Higher values mean better quality but larger file sizes. Ignored for PNG format.",
+                        "maximum": 100,
+                        "minimum": 0,
+                        "type": "number"
+                      },
+                      "uid": {
+                        "description": "The uid of an element on the page from the page content snapshot. If omitted takes a pages screenshot.",
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__take_screenshot"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Take a text snapshot of the currently selected page based on the a11y tree. The snapshot lists page elements along with a unique\nidentifier (uid). Always use the latest snapshot. Prefer taking a snapshot over taking a screenshot. The snapshot indicates the element selected\nin the DevTools Elements panel (if any).",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "filePath": {
+                        "description": "The absolute path, or a path relative to the current working directory, to save the snapshot to instead of attaching it to the response.",
+                        "type": "string"
+                      },
+                      "verbose": {
+                        "description": "Whether to include all possible information available in the full a11y tree. Default is false.",
+                        "type": "boolean"
+                      }
+                    },
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__take_snapshot"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Upload a file through a provided element.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "filePath": {
+                        "description": "The local path of the file to upload",
+                        "type": "string"
+                      },
+                      "includeSnapshot": {
+                        "description": "Whether to include a snapshot in the response. Default is false.",
+                        "type": "boolean"
+                      },
+                      "uid": {
+                        "description": "The uid of the file input element or an element that will open file chooser on the page from the page content snapshot",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "uid",
+                      "filePath"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__upload_file"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Wait for the specified text to appear on the selected page.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "properties": {
+                      "text": {
+                        "description": "Text to appear on the page",
+                        "type": "string"
+                      },
+                      "timeout": {
+                        "description": "Maximum wait time in milliseconds. If set to 0, the default timeout will be used.",
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "text"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__chrome-devtools__wait_for"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Add a chart to a worksheet using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "AddChartRequest",
+                    "properties": {
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the worksheet.",
+                        "type": "string"
+                      },
+                      "seriesby": {
+                        "description": "How the series are by (e.g., 'Auto').",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "sourcedata": {
+                        "description": "The range of source data for the chart (e.g., 'A1:C4').",
+                        "type": "string"
+                      },
+                      "type": {
+                        "description": "The type of chart to add (e.g., 'ColumnClustered').",
+                        "type": "string"
+                      },
+                      "worksheet": {
+                        "description": "The name or ID of the worksheet (must be URL-encoded if using ID).",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "item_id",
+                      "seriesby",
+                      "sourcedata",
+                      "type",
+                      "worksheet"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__add_chart"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Add a new worksheet to a sharepoint excel workbook using microsoft graph sites api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "AddSharepointWorksheetRequest",
+                    "properties": {
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) to add a worksheet to.",
+                        "type": "string"
+                      },
+                      "name": {
+                        "description": "The name of the new worksheet to add.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "site_id": {
+                        "description": "The ID of the SharePoint site containing the Excel file.\nExample: \"contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE\"",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "item_id",
+                      "name",
+                      "site_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__add_sharepoint_worksheet"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Create a table in a workbook using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "AddTableRequest",
+                    "properties": {
+                      "hasHeaders": {
+                        "description": "Whether the table has headers.",
+                        "type": "boolean"
+                      },
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the table.",
+                        "type": "string"
+                      },
+                      "name": {
+                        "description": "The name of the new table.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "showTotals": {
+                        "description": "Whether the table shows totals.",
+                        "type": "boolean"
+                      },
+                      "style": {
+                        "description": "The style of the table.",
+                        "type": "string"
+                      },
+                      "table_id": {
+                        "description": "The ID of the table to add to.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "hasHeaders",
+                      "item_id",
+                      "name",
+                      "showTotals",
+                      "style",
+                      "table_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__add_table"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Add a column to a table using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "AddTableColumnRequest",
+                    "properties": {
+                      "index": {
+                        "description": "The index at which to insert the column.",
+                        "type": "integer"
+                      },
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the table.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "table_id": {
+                        "description": "The ID of the table to add a column to.",
+                        "type": "string"
+                      },
+                      "values": {
+                        "description": "The values for the new column.",
+                        "items": {
+                          "type": "array"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "index",
+                      "item_id",
+                      "table_id",
+                      "values"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__add_table_column"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Add a row to a table using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "AddTableRowRequest",
+                    "properties": {
+                      "index": {
+                        "anyOf": [
+                          {
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "The index at which to insert the row. Null to append."
+                      },
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the table.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "table_id": {
+                        "description": "The ID of the table to add a row to.",
+                        "type": "string"
+                      },
+                      "values": {
+                        "description": "The values for the new row.",
+                        "items": {
+                          "type": "array"
+                        },
+                        "type": "array"
+                      }
+                    },
+                    "required": [
+                      "item_id",
+                      "table_id",
+                      "values"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__add_table_row"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Tool to grant access to a workbook via invite. use when you need to share a specific workbook file with designated recipients and roles.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "AddWorkbookPermissionRequest",
+                    "properties": {
+                      "expirationDateTime": {
+                        "anyOf": [
+                          {
+                            "format": "date-time",
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "DateTime when the granted permission will expire (ISO 8601)."
+                      },
+                      "item_id": {
+                        "description": "The ID of the drive item (Excel file) to share.",
+                        "type": "string"
+                      },
+                      "message": {
+                        "default": null,
+                        "description": "Plain-text message included in the invitation (max 2000 characters).",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "password": {
+                        "default": null,
+                        "description": "Password for the invite (OneDrive Personal only).",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "recipients": {
+                        "description": "Collection of recipients to grant access and send the invitation.",
+                        "items": {
+                          "additionalProperties": false,
+                          "description": "DriveRecipient",
+                          "properties": {
+                            "alias": {
+                              "default": null,
+                              "description": "A display alias for the recipient.",
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "email": {
+                              "description": "Email address of the recipient.",
+                              "type": "string"
+                            },
+                            "objectId": {
+                              "default": null,
+                              "description": "Azure AD object ID of an existing user or group.",
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "email"
+                          ],
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "requireSignIn": {
+                        "default": null,
+                        "description": "If true, recipients must sign in to view the shared item.",
+                        "type": [
+                          "boolean",
+                          "null"
+                        ]
+                      },
+                      "retainInheritedPermissions": {
+                        "default": true,
+                        "description": "If true, existing inherited permissions remain; if false, existing permissions are removed on first share.",
+                        "type": [
+                          "boolean",
+                          "null"
+                        ]
+                      },
+                      "roles": {
+                        "description": "Roles to grant: read or write.",
+                        "items": {
+                          "enum": [
+                            "read",
+                            "write"
+                          ],
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "sendInvitation": {
+                        "default": true,
+                        "description": "If true, sends an email invitation; otherwise grants permission silently.",
+                        "type": [
+                          "boolean",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "item_id",
+                      "recipients",
+                      "roles"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__add_workbook_permission"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Add a new worksheet to an excel workbook using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "AddWorksheetRequest",
+                    "properties": {
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) to add a worksheet to.",
+                        "type": "string"
+                      },
+                      "name": {
+                        "description": "The name of the new worksheet to add.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "item_id",
+                      "name"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__add_worksheet"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Apply a filter to a table column using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "ApplyTableFilterRequest",
+                    "properties": {
+                      "column_id": {
+                        "description": "The ID of the column to filter.",
+                        "type": "string"
+                      },
+                      "criteria": {
+                        "additionalProperties": true,
+                        "description": "The filter criteria as a dictionary.",
+                        "properties": {},
+                        "type": "object"
+                      },
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the worksheet.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "table_id": {
+                        "description": "The ID of the table.",
+                        "type": "string"
+                      },
+                      "worksheet": {
+                        "description": "The name or ID of the worksheet (must be URL-encoded if using ID).",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "column_id",
+                      "criteria",
+                      "item_id",
+                      "table_id",
+                      "worksheet"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__apply_table_filter"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Apply a sort to a table using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "ApplyTableSortRequest",
+                    "properties": {
+                      "fields": {
+                        "description": "List of sort fields (e.g., [{ 'key': 0, 'ascending': true }]).",
+                        "items": {
+                          "additionalProperties": true,
+                          "properties": {},
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the worksheet.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "table_id": {
+                        "description": "The ID of the table to sort.",
+                        "type": "string"
+                      },
+                      "worksheet": {
+                        "description": "The name or ID of the worksheet (must be URL-encoded if using ID).",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "fields",
+                      "item_id",
+                      "table_id",
+                      "worksheet"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__apply_table_sort"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Tool to clear values, formats, or contents in a specified worksheet range. use when you need to reset cells before adding new data.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "ClearRangeRequest",
+                    "properties": {
+                      "address": {
+                        "description": "The A1-style address of the range to clear (e.g., 'A1:B2').",
+                        "type": "string"
+                      },
+                      "applyTo": {
+                        "anyOf": [
+                          {
+                            "enum": [
+                              "All",
+                              "Formats",
+                              "Contents"
+                            ],
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Optional. The type of clear action. Possible values: All, Formats, Contents.\nExamples:\n  \"All\"\n  \"Formats\"\n  \"Contents\""
+                      },
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the worksheet.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional. The workbook session ID for persistent changes.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "worksheet_id": {
+                        "description": "The name or ID of the worksheet (URL-encoded if necessary).",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "address",
+                      "item_id",
+                      "worksheet_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__clear_range"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Clear a filter from a table column using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "ClearTableFilterRequest",
+                    "properties": {
+                      "column_id": {
+                        "description": "The ID of the column to clear filter from.",
+                        "type": "string"
+                      },
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the worksheet.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "table_id": {
+                        "description": "The ID of the table.",
+                        "type": "string"
+                      },
+                      "worksheet": {
+                        "description": "The name or ID of the worksheet (must be URL-encoded if using ID).",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "column_id",
+                      "item_id",
+                      "table_id",
+                      "worksheet"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__clear_table_filter"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Tool to close an existing excel workbook session. use when you need to explicitly end a persistent session to release workbook locks.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "CloseSessionRequest",
+                    "properties": {
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) to close the session for.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "description": "The workbook session ID to close.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "item_id",
+                      "session_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__close_session"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Convert a table to a range using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "ConvertTableToRangeRequest",
+                    "properties": {
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the table.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "table_id": {
+                        "description": "The ID of the table to convert to a range.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "item_id",
+                      "table_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__convert_table_to_range"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Tool to create a new workbook file at a specified drive path. use when uploading a new .xlsx file to onedrive.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "CreateWorkbookRequest",
+                    "properties": {
+                      "content": {
+                        "contentEncoding": "base64",
+                        "description": "Binary contents of the .xlsx file to upload.",
+                        "type": "string"
+                      },
+                      "drive_id": {
+                        "default": "me",
+                        "description": "ID of the drive (use 'me' for the user's default drive)",
+                        "type": "string"
+                      },
+                      "path": {
+                        "description": "Path including folder structure and file name, ending with .xlsx, e.g., 'Documents/newWorkbook.xlsx'",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "content",
+                      "path"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__create_workbook"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Delete a column from a table using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "DeleteTableColumnRequest",
+                    "properties": {
+                      "column_id": {
+                        "description": "The ID of the column to delete.",
+                        "type": "string"
+                      },
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the table.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "table_id": {
+                        "description": "The ID of the table to delete a column from.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "column_id",
+                      "item_id",
+                      "table_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__delete_table_column"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Delete a row from a table using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "DeleteTableRowRequest",
+                    "properties": {
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the table.",
+                        "type": "string"
+                      },
+                      "row_index": {
+                        "description": "The index of the row to delete.",
+                        "type": "integer"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "table_id": {
+                        "description": "The ID of the table to delete a row from.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "item_id",
+                      "row_index",
+                      "table_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__delete_table_row"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Tool to delete a worksheet from the workbook. use when cleaning up unused or temporary sheets after verifying no dependencies exist. example: \"delete 'sheet2' after review.\"",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "DeleteWorksheetRequest",
+                    "properties": {
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the worksheet.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "worksheet": {
+                        "description": "The name or ID of the worksheet to delete. If using ID, it must be URL-encoded.\nExamples:\n  \"Sheet1\"\n  \"abcd1234-ef56-7890-abcd-ef1234567890\"",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "item_id",
+                      "worksheet"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__delete_worksheet"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Tool to retrieve a specific axis from a chart. use when you need properties like min, max, interval, and formatting of the chart axis.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "Request model for retrieving a specific axis from a chart.",
+                    "properties": {
+                      "axis_type": {
+                        "description": "The type of axis to retrieve. Allowed values: 'valueAxis', 'seriesAxis', 'categoryAxis'.\nExample: \"valueAxis\"",
+                        "enum": [
+                          "valueAxis",
+                          "seriesAxis",
+                          "categoryAxis"
+                        ],
+                        "type": "string"
+                      },
+                      "chart_name": {
+                        "description": "The name or ID of the chart (must be URL-encoded).\nExample: \"Chart1\"",
+                        "type": "string"
+                      },
+                      "expand": {
+                        "default": null,
+                        "description": "OData $expand query option to expand related entities (format).\nExample: \"format\"",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the workbook.\nExample: \"0123456789abcdef\"",
+                        "type": "string"
+                      },
+                      "select": {
+                        "default": null,
+                        "description": "OData $select query option to specify which properties to return.\nExample: \"minimum,maximum\"",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional workbook session ID. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "worksheet": {
+                        "description": "The name or ID of the worksheet (must be URL-encoded if using ID).\nExample: \"Sheet1\"",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "axis_type",
+                      "chart_name",
+                      "item_id",
+                      "worksheet"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__get_chart_axis"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Tool to retrieve the data labels object of a chart. use when you need to inspect label settings like position, separator, and visibility flags after creating or updating a chart.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "Request model for retrieving the data labels of a chart.",
+                    "properties": {
+                      "chart_id": {
+                        "description": "The ID or name of the chart (must be URL-encoded if using special characters).\nExample: \"chart1\"",
+                        "type": "string"
+                      },
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the workbook.\nExample: \"0123456789abcdef\"",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional workbook session ID. If provided, will be sent in the headers to maintain session state.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "worksheet_id": {
+                        "description": "The ID or name of the worksheet (must be URL-encoded if using special characters).\nExample: \"Sheet1\"",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "chart_id",
+                      "item_id",
+                      "worksheet_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__get_chart_data_labels"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Tool to retrieve the legend object of a chart. use after creating or updating a chart when you need to inspect legend visibility and formatting.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "Request model for retrieving the legend object of a chart.",
+                    "properties": {
+                      "chart_name": {
+                        "description": "The name or ID of the chart (URL-encoded if necessary).\nExample: \"Chart1\"",
+                        "type": "string"
+                      },
+                      "expand": {
+                        "default": null,
+                        "description": "OData $expand query option to expand related entities, such as format.\nExample: \"format\"",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the workbook.\nExample: \"0123456789abcdef\"",
+                        "type": "string"
+                      },
+                      "select": {
+                        "default": null,
+                        "description": "OData $select query option to specify which properties to return (comma-separated).\nExample: \"visible,position\"",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional workbook session ID. If provided, will be sent in the headers to maintain session state.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "worksheet_id": {
+                        "description": "The ID or name of the worksheet (URL-encoded if necessary).\nExample: \"Sheet1\"",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "chart_name",
+                      "item_id",
+                      "worksheet_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__get_chart_legend"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Get a range from a worksheet using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "GetRangeRequest",
+                    "properties": {
+                      "address": {
+                        "description": "The address of the range (e.g., 'A1:B2').",
+                        "type": "string"
+                      },
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the worksheet.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "worksheet_id": {
+                        "description": "The ID of the worksheet.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "address",
+                      "item_id",
+                      "worksheet_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__get_range"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Create a session for an excel workbook using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "CreateSessionRequest",
+                    "properties": {
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) to create a session for.",
+                        "type": "string"
+                      },
+                      "persist_changes": {
+                        "default": true,
+                        "description": "Whether changes should be persisted after the session. If false, a nonpersistent session is created.",
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "item_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__get_session"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Get a range from a worksheet in sharepoint using microsoft graph sites api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "GetSharepointRangeRequest",
+                    "properties": {
+                      "address": {
+                        "description": "The address of the range (e.g., 'A1:B2').",
+                        "type": "string"
+                      },
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the worksheet.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "site_id": {
+                        "description": "The ID of the SharePoint site containing the Excel file.\nExample: \"contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE\"",
+                        "type": "string"
+                      },
+                      "worksheet_id": {
+                        "description": "The ID of the worksheet.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "address",
+                      "item_id",
+                      "site_id",
+                      "worksheet_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__get_sharepoint_range"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Get a worksheet by name or id from a sharepoint excel workbook using microsoft graph sites api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "GetSharepointWorksheetRequest",
+                    "properties": {
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) to get the worksheet from.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "site_id": {
+                        "description": "The ID of the SharePoint site containing the Excel file.\nExample: \"contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE\"",
+                        "type": "string"
+                      },
+                      "worksheet": {
+                        "description": "The name or ID of the worksheet to retrieve. If using ID, it must be URL-encoded.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "item_id",
+                      "site_id",
+                      "worksheet"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__get_sharepoint_worksheet"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Tool to retrieve a specific column from a workbook table. use when you need to fetch column properties and data by its id or name.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "GetTableColumnRequest",
+                    "properties": {
+                      "column_id": {
+                        "description": "The ID or name of the column to retrieve.",
+                        "type": "string"
+                      },
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the table.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "table_id": {
+                        "description": "The ID or name of the table containing the column.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "column_id",
+                      "item_id",
+                      "table_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__get_table_column"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Tool to retrieve the properties and relationships of a workbook. use when you need to inspect comments, names, tables, or worksheets.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "GetWorkbookRequest",
+                    "properties": {
+                      "drive_id": {
+                        "description": "ID of the drive (use 'me' for the user's default drive).\nExamples:\n  \"me\"\n  \"drive-id\"",
+                        "type": "string"
+                      },
+                      "expand": {
+                        "anyOf": [
+                          {
+                            "items": {
+                              "enum": [
+                                "comments",
+                                "names",
+                                "operations",
+                                "tables",
+                                "worksheets"
+                              ],
+                              "type": "string"
+                            },
+                            "type": "array"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "OData relationships to expand in the response.\nExample: [\"comments\",\"worksheets\"]"
+                      },
+                      "item_id": {
+                        "description": "ID of the drive item (Excel file) to retrieve.\nExample: \"item-id\"",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional workbook session ID. If provided, will be sent in headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "drive_id",
+                      "item_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__get_workbook"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Get a worksheet by name or id from an excel workbook using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "GetWorksheetRequest",
+                    "properties": {
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) to get the worksheet from.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "worksheet": {
+                        "description": "The name or ID of the worksheet to retrieve. If using ID, it must be URL-encoded.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "item_id",
+                      "worksheet"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__get_worksheet"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Tool to insert a new cell range into a worksheet, shifting existing cells down or right. use when you need to create space for new content without overwriting.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "InsertRangeRequest",
+                    "properties": {
+                      "address": {
+                        "description": "The address of the range (e.g., 'A1:B2').",
+                        "type": "string"
+                      },
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the worksheet.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional workbook session ID. If provided, changes persist in that session.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "shift": {
+                        "description": "Direction to shift cells to make space: 'Down' or 'Right'.\nExamples:\n  \"Down\"\n  \"Right\"",
+                        "enum": [
+                          "Down",
+                          "Right"
+                        ],
+                        "type": "string"
+                      },
+                      "worksheet_id": {
+                        "description": "The ID or name of the worksheet.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "address",
+                      "item_id",
+                      "shift",
+                      "worksheet_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__insert_range"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "List charts in a worksheet using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "ListChartsRequest",
+                    "properties": {
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the worksheet.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "worksheet": {
+                        "description": "The name or ID of the worksheet (must be URL-encoded if using ID).",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "item_id",
+                      "worksheet"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__list_charts"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Tool to list all data series in a chart. use when you need to enumerate chart series for further analysis.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "Request model for listing all data series in an Excel chart.",
+                    "properties": {
+                      "chart_name": {
+                        "description": "The name or ID of the chart (must be URL-encoded).",
+                        "type": "string"
+                      },
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the worksheet.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "worksheet": {
+                        "description": "The name or ID of the worksheet (must be URL-encoded if using ID).",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "chart_name",
+                      "item_id",
+                      "worksheet"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__list_chart_series"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Tool to list comments in an excel workbook. use when you need to retrieve all workbook comments via microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "ListCommentsRequest",
+                    "properties": {
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) to list comments for.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "item_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__list_comments"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "List files and folders in a drive root or specified path.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "ListFilesRequest",
+                    "properties": {
+                      "drive_id": {
+                        "default": "me",
+                        "description": "ID of the drive (use 'me' for the user's default drive)",
+                        "type": "string"
+                      },
+                      "path": {
+                        "default": null,
+                        "description": "Optional folder path under root to list. E.g., 'Documents'",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__list_files"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "List named items in a workbook using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "ListNamedItemsRequest",
+                    "properties": {
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the workbook.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "item_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__list_named_items"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "List tables in a sharepoint worksheet using microsoft graph sites api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "ListSharepointTablesRequest",
+                    "properties": {
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the worksheet.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "site_id": {
+                        "description": "The ID of the SharePoint site containing the Excel file.\nExample: \"contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE\"",
+                        "type": "string"
+                      },
+                      "worksheet": {
+                        "description": "The name or ID of the worksheet (must be URL-encoded if using ID).",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "item_id",
+                      "site_id",
+                      "worksheet"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__list_sharepoint_tables"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "List worksheets in an excel workbook stored in sharepoint using microsoft graph sites api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "ListSharepointWorksheetsRequest",
+                    "properties": {
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) to list worksheets for.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "site_id": {
+                        "description": "The ID of the SharePoint site containing the Excel file.\nExample: \"contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE\"",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "item_id",
+                      "site_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__list_sharepoint_worksheets"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "List columns in a table using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "ListTableColumnsRequest",
+                    "properties": {
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the table.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "table_id": {
+                        "description": "The ID of the table to list columns from.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "item_id",
+                      "table_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__list_table_columns"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "List rows in a table using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "ListTableRowsRequest",
+                    "properties": {
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the table.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "table_id": {
+                        "description": "The ID of the table to list rows from.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "item_id",
+                      "table_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__list_table_rows"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "List tables in a worksheet using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "ListTablesRequest",
+                    "properties": {
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the worksheet.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "worksheet": {
+                        "description": "The name or ID of the worksheet (must be URL-encoded if using ID).",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "item_id",
+                      "worksheet"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__list_tables"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Tool to list permissions set on the workbook file. use when you need to see which users or links have access to a specific excel file by supplying its drive and item ids. example: \"list permissions for workbook with drive id 'b!abc123' and item id '0123456789abcdef'.\"",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "ListWorkbookPermissionsRequest",
+                    "properties": {
+                      "$expand": {
+                        "default": null,
+                        "description": "Comma-separated list of related entities to expand.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "$select": {
+                        "default": null,
+                        "description": "Comma-separated list of permission properties to include in the response.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "$skip": {
+                        "anyOf": [
+                          {
+                            "minimum": 0,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Number of permission objects to skip."
+                      },
+                      "$top": {
+                        "anyOf": [
+                          {
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Maximum number of permission objects to return."
+                      },
+                      "drive_id": {
+                        "description": "The ID of the drive containing the workbook file.",
+                        "type": "string"
+                      },
+                      "item_id": {
+                        "description": "The ID of the DriveItem representing the workbook.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "drive_id",
+                      "item_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__list_workbook_permissions"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "List worksheets in an excel workbook using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "ListWorksheetsRequest",
+                    "properties": {
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) to list worksheets for.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "item_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__list_worksheets"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Merge cells in a worksheet range using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "MergeCellsRequest",
+                    "properties": {
+                      "across": {
+                        "default": null,
+                        "description": "Optional. Set true to merge cells in each row of the specified range as separate merged cells. The default value is false.",
+                        "type": [
+                          "boolean",
+                          "null"
+                        ]
+                      },
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the worksheet.",
+                        "type": "string"
+                      },
+                      "range": {
+                        "description": "The A1-style address of the range to merge (e.g., 'A1:B2').\nExamples:\n  \"A1:B2\"\n  \"C3:E5\"",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "worksheet": {
+                        "description": "The name or ID of the worksheet containing the range to merge.\nExamples:\n  \"Sheet1\"\n  \"abcd1234-ef56-7890-abcd-ef1234567890\"",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "item_id",
+                      "range",
+                      "worksheet"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__merge_cells"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Tool to protect a worksheet using optional protection options. use when you need to prevent editing certain parts of a sheet before sharing. example: \"protect 'sheet1' to lock formatting and sorting.\"",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "ProtectWorksheetRequest",
+                    "properties": {
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the worksheet.",
+                        "type": "string"
+                      },
+                      "options": {
+                        "anyOf": [
+                          {
+                            "additionalProperties": false,
+                            "properties": {
+                              "allowAutoFilter": {
+                                "default": null,
+                                "description": "Allow use of the autofilter feature.",
+                                "type": [
+                                  "boolean",
+                                  "null"
+                                ]
+                              },
+                              "allowDeleteColumns": {
+                                "default": null,
+                                "description": "Allow deleting columns.",
+                                "type": [
+                                  "boolean",
+                                  "null"
+                                ]
+                              },
+                              "allowDeleteRows": {
+                                "default": null,
+                                "description": "Allow deleting rows.",
+                                "type": [
+                                  "boolean",
+                                  "null"
+                                ]
+                              },
+                              "allowFormatCells": {
+                                "default": null,
+                                "description": "Allow formatting cells.",
+                                "type": [
+                                  "boolean",
+                                  "null"
+                                ]
+                              },
+                              "allowFormatColumns": {
+                                "default": null,
+                                "description": "Allow formatting columns.",
+                                "type": [
+                                  "boolean",
+                                  "null"
+                                ]
+                              },
+                              "allowFormatRows": {
+                                "default": null,
+                                "description": "Allow formatting rows.",
+                                "type": [
+                                  "boolean",
+                                  "null"
+                                ]
+                              },
+                              "allowInsertColumns": {
+                                "default": null,
+                                "description": "Allow inserting columns.",
+                                "type": [
+                                  "boolean",
+                                  "null"
+                                ]
+                              },
+                              "allowInsertHyperlinks": {
+                                "default": null,
+                                "description": "Allow inserting hyperlinks.",
+                                "type": [
+                                  "boolean",
+                                  "null"
+                                ]
+                              },
+                              "allowInsertRows": {
+                                "default": null,
+                                "description": "Allow inserting rows.",
+                                "type": [
+                                  "boolean",
+                                  "null"
+                                ]
+                              },
+                              "allowPivotTables": {
+                                "default": null,
+                                "description": "Allow use of pivot tables.",
+                                "type": [
+                                  "boolean",
+                                  "null"
+                                ]
+                              },
+                              "allowSort": {
+                                "default": null,
+                                "description": "Allow use of the sort feature.",
+                                "type": [
+                                  "boolean",
+                                  "null"
+                                ]
+                              }
+                            },
+                            "type": "object"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "Sheet protection options. If omitted, default protection is applied."
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "worksheet": {
+                        "description": "The name or ID of the worksheet to protect. If using ID, it must be URL-encoded.\nExamples:\n  \"Sheet1\"\n  \"abcd1234-ef56-7890-abcd-ef1234567890\"",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "item_id",
+                      "worksheet"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__protect_worksheet"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Sort a range in a worksheet using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "SortRangeRequest",
+                    "properties": {
+                      "fields": {
+                        "description": "List of sort fields (e.g., [{ 'key': 0, 'ascending': true }]).",
+                        "items": {
+                          "additionalProperties": true,
+                          "properties": {},
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the worksheet.",
+                        "type": "string"
+                      },
+                      "range_type": {
+                        "description": "The type of range to sort (e.g., 'usedRange').",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "worksheet": {
+                        "description": "The name or ID of the worksheet (must be URL-encoded if using ID).",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "fields",
+                      "item_id",
+                      "range_type",
+                      "worksheet"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__sort_range"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Update a chart in a worksheet using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "UpdateChartRequest",
+                    "properties": {
+                      "chart_id": {
+                        "description": "The ID of the chart (must be URL-encoded).",
+                        "type": "string"
+                      },
+                      "height": {
+                        "default": null,
+                        "description": "The new height for the chart.",
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the worksheet.",
+                        "type": "string"
+                      },
+                      "left": {
+                        "default": null,
+                        "description": "The new left position for the chart.",
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "name": {
+                        "default": null,
+                        "description": "The new name for the chart.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "top": {
+                        "default": null,
+                        "description": "The new top position for the chart.",
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "width": {
+                        "default": null,
+                        "description": "The new width for the chart.",
+                        "type": [
+                          "number",
+                          "null"
+                        ]
+                      },
+                      "worksheet": {
+                        "description": "The name or ID of the worksheet (must be URL-encoded if using ID).",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "chart_id",
+                      "item_id",
+                      "worksheet"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__update_chart"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Tool to update formatting or position of a chart legend. use when adjusting legend settings after confirming chart and worksheet exist.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "Request model for updating a chart legend's properties.",
+                    "properties": {
+                      "chart_id": {
+                        "description": "The name or ID of the chart (must be URL-encoded).\nExample: \"chartName\"",
+                        "type": "string"
+                      },
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the workbook.\nExample: \"0123456789abcdef\"",
+                        "type": "string"
+                      },
+                      "overlay": {
+                        "default": null,
+                        "description": "Set to true to make the legend overlap the chart body, or false otherwise.\nExample: false",
+                        "type": [
+                          "boolean",
+                          "null"
+                        ]
+                      },
+                      "position": {
+                        "anyOf": [
+                          {
+                            "enum": [
+                              "Top",
+                              "Bottom",
+                              "Left",
+                              "Right",
+                              "Corner",
+                              "Custom"
+                            ],
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "The position of the legend on the chart. Possible values: Top, Bottom, Left, Right, Corner, Custom.\nExample: \"Top\""
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional workbook session ID. If provided, will be sent in the 'workbook-session-id' header.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "visible": {
+                        "default": null,
+                        "description": "Set to true to show the chart legend, or false to hide it.\nExample: true",
+                        "type": [
+                          "boolean",
+                          "null"
+                        ]
+                      },
+                      "worksheet": {
+                        "description": "The name or ID of the worksheet (must be URL-encoded if using ID).\nExample: \"Sheet1\"",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "chart_id",
+                      "item_id",
+                      "worksheet"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__update_chart_legend"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Update a range in a worksheet using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "UpdateRangeRequest",
+                    "properties": {
+                      "address": {
+                        "description": "The address of the range (e.g., 'A1:B2').",
+                        "type": "string"
+                      },
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the worksheet.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "values": {
+                        "description": "The values to update in the range.",
+                        "items": {
+                          "type": "array"
+                        },
+                        "type": "array"
+                      },
+                      "worksheet_id": {
+                        "description": "The ID of the worksheet.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "address",
+                      "item_id",
+                      "values",
+                      "worksheet_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__update_range"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Update a range in a sharepoint worksheet using microsoft graph sites api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "UpdateSharepointRangeRequest",
+                    "properties": {
+                      "address": {
+                        "description": "The address of the range (e.g., 'A1:B2').",
+                        "type": "string"
+                      },
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the worksheet.",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "site_id": {
+                        "description": "The ID of the SharePoint site containing the Excel file.\nExample: \"contoso.sharepoint.com,2C712604-1370-44E7-A1F5-426573FDA80A,2D2244C3-251A-49EA-93A8-39E1C3A060FE\"",
+                        "type": "string"
+                      },
+                      "values": {
+                        "description": "The values to update in the range.",
+                        "items": {
+                          "type": "array"
+                        },
+                        "type": "array"
+                      },
+                      "worksheet_id": {
+                        "description": "The ID of the worksheet.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "address",
+                      "item_id",
+                      "site_id",
+                      "values",
+                      "worksheet_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__update_sharepoint_range"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Update a table in a workbook using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "UpdateTableRequest",
+                    "properties": {
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the table.",
+                        "type": "string"
+                      },
+                      "name": {
+                        "default": null,
+                        "description": "The new name for the table.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "showHeaders": {
+                        "default": null,
+                        "description": "Whether the table shows headers.",
+                        "type": [
+                          "boolean",
+                          "null"
+                        ]
+                      },
+                      "showTotals": {
+                        "default": null,
+                        "description": "Whether the table shows totals.",
+                        "type": [
+                          "boolean",
+                          "null"
+                        ]
+                      },
+                      "style": {
+                        "default": null,
+                        "description": "The style of the table.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "table_id": {
+                        "description": "The ID of the table to update.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "item_id",
+                      "table_id"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__update_table"
+              }
+            },
+            {
+              "toolSpecification": {
+                "description": "Update worksheet properties (name, position) in an excel workbook using microsoft graph api.",
+                "inputSchema": {
+                  "json": {
+                    "$schema": "http://json-schema.org/draft-07/schema#",
+                    "additionalProperties": false,
+                    "description": "UpdateWorksheetRequest",
+                    "properties": {
+                      "item_id": {
+                        "description": "The ID of the Excel file (drive item) containing the worksheet.",
+                        "type": "string"
+                      },
+                      "name": {
+                        "default": null,
+                        "description": "The new name for the worksheet.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "position": {
+                        "anyOf": [
+                          {
+                            "type": "integer"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "default": null,
+                        "description": "The new position for the worksheet."
+                      },
+                      "session_id": {
+                        "default": null,
+                        "description": "Optional session ID for the workbook. If provided, will be sent in the headers.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "worksheet": {
+                        "description": "The name or ID of the worksheet to update. If using ID, it must be URL-encoded.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "item_id",
+                      "worksheet"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "name": "mcp__excel__update_worksheet"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "history": [
+      {
+        "userInputMessage": {
+          "content": "x-anthropic-billing-header: cc_version=2.1.27.590; cc_entrypoint=cli;You are Claude Code, Anthropic's official CLI for Claude.You are a file search specialist for Claude Code, Anthropic's official CLI for Claude. You excel at thoroughly navigating and exploring codebases.\n\n=== CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS ===\nThis is a READ-ONLY exploration task. You are STRICTLY PROHIBITED from:\n- Creating new files (no Write, touch, or file creation of any kind)\n- Modifying existing files (no Edit operations)\n- Deleting files (no rm or deletion)\n- Moving or copying files (no mv or cp)\n- Creating temporary files anywhere, including /tmp\n- Using redirect operators (\u003e, \u003e\u003e, |) or heredocs to write to files\n- Running ANY commands that change system state\n\nYour role is EXCLUSIVELY to search and analyze existing code. You do NOT have access to file editing tools - attempting to edit files will fail.\n\nYour strengths:\n- Rapidly finding files using glob patterns\n- Searching code and text with powerful regex patterns\n- Reading and analyzing file contents\n\nGuidelines:\n- Use Glob for broad file pattern matching\n- Use Grep for searching file contents with regex\n- Use Read when you know the specific file path you need to read\n- Use Bash ONLY for read-only operations (ls, git status, git log, git diff, find, cat, head, tail)\n- NEVER use Bash for: mkdir, touch, rm, cp, mv, git add, git commit, npm install, pip install, or any file creation/modification\n- Adapt your search approach based on the thoroughness level specified by the caller\n- Return file paths as absolute paths in your final response\n- For clear communication, avoid using emojis\n- Communicate your final report directly as a regular message - do NOT attempt to create files\n\nNOTE: You are meant to be a fast agent that returns output as quickly as possible. In order to achieve this you must:\n- Make efficient use of the tools that you have at your disposal: be smart about how you search for files and implementations\n- Wherever possible you should try to spawn multiple parallel tool calls for grepping and reading files\n\nComplete the user's search request efficiently and report your findings clearly.\n\nNotes:\n- Agent threads always have their cwd reset between bash calls, as a result please only use absolute file paths.\n- In your final response always share relevant file names and code snippets. Any file paths you return in your response MUST be absolute. Do NOT use relative paths.\n- For clear communication with the user the assistant MUST avoid using emojis.\n- Do not use a colon before tool calls. Text like \"Let me read the file:\" followed by a read tool call should just be \"Let me read the file.\" with a period.\n\nHere is useful information about the environment you are running in:\n\u003cenv\u003e\nWorking directory: D:\\Projects\\VS Code\\animals_spider\nIs directory a git repo: Yes\nPlatform: win32\nOS Version: \nToday's date: 2026-02-01\n\u003c/env\u003e\nYou are powered by the model named Haiku 4.5. The exact model ID is claude-haiku-4-5-20251001.\n\nAssistant knowledge cutoff is February 2025.\n\n\u003cclaude_background_info\u003e\nThe most recent frontier Claude model is Claude Opus 4.5 (model ID: 'claude-opus-4-5-20251101').\n\u003c/claude_background_info\u003e\n\ngitStatus: This is the git status at the start of the conversation. Note that this status is a snapshot in time, and will not update during the conversation.\nCurrent branch: main\n\nMain branch (you will usually use this for PRs): main\n\nStatus:\nM species/CLAUDE.md\n D species/export_species_csv.py\n M species/spider.py\n\nRecent commits:\nf8965c7 init;\n\n我需要理解 species/data/species_taxonomy.json 的数据结构，特别是：\n\n1. 查看实际的数据示例，了解不同分类层级（界、门、纲、目、科、属、种）的节点结构\n2. 找出一些\"种\"节点学名不完整的具体例子（只有种小名，缺少属名）\n3. 理解如何通过父节点的中文名来判断分类层级（例如：以\"属\"结尾的是属级节点）\n4. 查看现有的 is_species_node.py 脚本，了解如何判断\"种\"节点\n\n重点关注：\n- 如何识别\"属\"级别的节点（可能通过中文名以\"属\"结尾来判断）\n- 学名格式的规律（双名法应该是两个单词，如 \"Amblyseius eharai\"）\n- 树形结构的遍历方式\n\n请提供具体的代码示例和数据示例。",
+          "modelId": "CLAUDE_SONNET_4_5_20250929_V1_0",
+          "origin": "AI_EDITOR"
+        }
+      },
+      {
+        "assistantResponseMessage": {
+          "content": "Continue"
+        }
+      }
+    ]
+  }
+}
