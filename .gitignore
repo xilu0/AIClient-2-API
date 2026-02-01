@@ -26,4 +26,5 @@ vendor/
 coverage.out
 /kiro-server
 
-kiro-debug
+kiro-debug*
+.kiro

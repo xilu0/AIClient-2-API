@@ -31,3 +31,4 @@ coverage.out
 tests/unit/
 tests/integration/
 tests/benchmark/
+kiro-debug*

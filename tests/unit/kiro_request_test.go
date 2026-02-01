@@ -709,6 +709,147 @@ func TestBuildRequestBody_ToolResultStatusAlwaysSuccess(t *testing.T) {
 	assert.Equal(t, "success", tr["status"])
 }
 
+func TestBuildRequestBody_SanitizesDollarPrefixedProperties(t *testing.T) {
+	messages := []map[string]interface{}{
+		{"role": "user", "content": "List permissions"},
+	}
+	messagesJSON, err := json.Marshal(messages)
+	require.NoError(t, err)
+
+	// Tool with $-prefixed property names (like MCP Excel tools with OData params)
+	tools := []map[string]interface{}{
+		{
+			"name":        "list_permissions",
+			"description": "List permissions",
+			"input_schema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"$expand": map[string]interface{}{
+						"type":    []string{"string", "null"},
+						"default": nil,
+					},
+					"$select": map[string]interface{}{
+						"type":    []string{"string", "null"},
+						"default": nil,
+					},
+					"$skip": map[string]interface{}{
+						"anyOf": []map[string]interface{}{
+							{"type": "integer", "minimum": 0},
+							{"type": "null"},
+						},
+						"default": nil,
+					},
+					"drive_id": map[string]interface{}{
+						"type": "string",
+					},
+				},
+				"required":            []string{"drive_id"},
+				"additionalProperties": false,
+				"$schema":             "http://json-schema.org/draft-07/schema#",
+			},
+		},
+	}
+	toolsJSON, err := json.Marshal(tools)
+	require.NoError(t, err)
+
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", toolsJSON)
+	require.NoError(t, err)
+
+	var req map[string]interface{}
+	err = json.Unmarshal(body, &req)
+	require.NoError(t, err)
+
+	convState := req["conversationState"].(map[string]interface{})
+	currentMsg := convState["currentMessage"].(map[string]interface{})
+	userInput := currentMsg["userInputMessage"].(map[string]interface{})
+	context := userInput["userInputMessageContext"].(map[string]interface{})
+	kiroTools := context["tools"].([]interface{})
+	require.Len(t, kiroTools, 1)
+
+	toolSpec := kiroTools[0].(map[string]interface{})["toolSpecification"].(map[string]interface{})
+	inputSchemaWrapper := toolSpec["inputSchema"].(map[string]interface{})
+
+	// Parse the inner JSON schema
+	schemaBytes, err := json.Marshal(inputSchemaWrapper["json"])
+	require.NoError(t, err)
+	var schema map[string]interface{}
+	err = json.Unmarshal(schemaBytes, &schema)
+	require.NoError(t, err)
+
+	props := schema["properties"].(map[string]interface{})
+
+	// $-prefixed properties should be removed
+	_, hasExpand := props["$expand"]
+	assert.False(t, hasExpand, "$expand should be removed from properties")
+	_, hasSelect := props["$select"]
+	assert.False(t, hasSelect, "$select should be removed from properties")
+	_, hasSkip := props["$skip"]
+	assert.False(t, hasSkip, "$skip should be removed from properties")
+
+	// Regular properties should be preserved
+	_, hasDriveID := props["drive_id"]
+	assert.True(t, hasDriveID, "drive_id should be preserved")
+
+	// $schema at top level should be preserved (it's a JSON Schema keyword, not a property name)
+	_, hasSchema := schema["$schema"]
+	assert.True(t, hasSchema, "$schema at top level should be preserved")
+}
+
+func TestBuildRequestBody_NoSanitizationWhenNoDollarProps(t *testing.T) {
+	messages := []map[string]interface{}{
+		{"role": "user", "content": "Write a file"},
+	}
+	messagesJSON, err := json.Marshal(messages)
+	require.NoError(t, err)
+
+	tools := []map[string]interface{}{
+		{
+			"name":        "Write",
+			"description": "Write content to a file",
+			"input_schema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"file_path": map[string]interface{}{"type": "string"},
+					"content":   map[string]interface{}{"type": "string"},
+				},
+				"required": []string{"file_path", "content"},
+			},
+		},
+	}
+	toolsJSON, err := json.Marshal(tools)
+	require.NoError(t, err)
+
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", toolsJSON)
+	require.NoError(t, err)
+
+	var req map[string]interface{}
+	err = json.Unmarshal(body, &req)
+	require.NoError(t, err)
+
+	convState := req["conversationState"].(map[string]interface{})
+	currentMsg := convState["currentMessage"].(map[string]interface{})
+	userInput := currentMsg["userInputMessage"].(map[string]interface{})
+	context := userInput["userInputMessageContext"].(map[string]interface{})
+	kiroTools := context["tools"].([]interface{})
+	require.Len(t, kiroTools, 1)
+
+	toolSpec := kiroTools[0].(map[string]interface{})["toolSpecification"].(map[string]interface{})
+	inputSchemaWrapper := toolSpec["inputSchema"].(map[string]interface{})
+
+	schemaBytes, err := json.Marshal(inputSchemaWrapper["json"])
+	require.NoError(t, err)
+	var schema map[string]interface{}
+	err = json.Unmarshal(schemaBytes, &schema)
+	require.NoError(t, err)
+
+	props := schema["properties"].(map[string]interface{})
+	assert.Len(t, props, 2, "all properties should be preserved when no $-prefixed names")
+	_, hasFilePath := props["file_path"]
+	assert.True(t, hasFilePath)
+	_, hasContent := props["content"]
+	assert.True(t, hasContent)
+}
+
 func TestBuildRequestBody_WithToolResultsAndTools(t *testing.T) {
 	// Simulate a real Claude Code scenario: tool_result with tools defined
 	messages := []map[string]interface{}{

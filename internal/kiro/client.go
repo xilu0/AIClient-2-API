@@ -248,8 +248,16 @@ func (e *APIError) IsContextTooLong() bool {
 	bodyStr := string(e.Body)
 	// Check for known Kiro context length error messages
 	return strings.Contains(bodyStr, "Input is too long") ||
-		strings.Contains(bodyStr, "CONTENT_LENGTH_EXCEEDS_THRESHOLD") ||
-		strings.Contains(bodyStr, "Improperly formed request")
+		strings.Contains(bodyStr, "CONTENT_LENGTH_EXCEEDS_THRESHOLD")
+}
+
+// IsImproperlyFormedRequest returns true if the error is "Improperly formed request".
+// This typically indicates missing tools definition when history contains toolUses.
+func (e *APIError) IsImproperlyFormedRequest() bool {
+	if e.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	return strings.Contains(string(e.Body), "Improperly formed request")
 }
 
 // buildKiroURL builds the Kiro API URL for the given region.
@@ -316,6 +324,9 @@ func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool,
 	}
 	var mergedMessages []MergedMessage
 
+	// Track all tool names from toolUses in history (for auto-generating tools definition)
+	toolNamesFromHistory := make(map[string]bool)
+
 	for _, msg := range claudeMessages {
 		var newMsg MergedMessage
 		if msg.Role == "user" {
@@ -324,6 +335,12 @@ func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool,
 		} else {
 			newMsg.Role = "assistant"
 			newMsg.AssistantContent = parseAssistantContent(msg.Content)
+			// Collect tool names from toolUses
+			for _, toolUse := range newMsg.AssistantContent.ToolUses {
+				if name, ok := toolUse["name"].(string); ok && name != "" {
+					toolNamesFromHistory[name] = true
+				}
+			}
 		}
 
 		if len(mergedMessages) > 0 {
@@ -352,32 +369,42 @@ func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool,
 		mergedMessages = append(mergedMessages, newMsg)
 	}
 
-	// Step 2: Handle system prompt
+	// Step 2: Build history and current message
+	// Match Node.js behavior: if there's a system prompt and first message is user,
+	// add system+user to history first, then process remaining messages
+	var history []map[string]interface{}
+	startIndex := 0
+
 	if system != "" {
 		if len(mergedMessages) > 0 && mergedMessages[0].Role == "user" {
-			// Prepend system prompt to first user message
-			if mergedMessages[0].UserContent.Text != "" {
-				mergedMessages[0].UserContent.Text = system + "\n\n" + mergedMessages[0].UserContent.Text
-			} else {
-				mergedMessages[0].UserContent.Text = system
+			// Add system + first user message to history (matching Node.js behavior)
+			firstUserContent := mergedMessages[0].UserContent.Text
+			if firstUserContent == "" {
+				firstUserContent = "Continue"
 			}
-		} else {
-			// Insert system prompt as new first user message
-			systemMsg := MergedMessage{
-				Role: "user",
-				UserContent: ParsedUserContent{
-					Text: system,
+			combinedContent := system + "\n\n" + firstUserContent
+			history = append(history, map[string]interface{}{
+				"userInputMessage": map[string]interface{}{
+					"content": combinedContent,
+					"modelId": kiroModel,
+					"origin":  "AI_EDITOR",
 				},
-			}
-			mergedMessages = append([]MergedMessage{systemMsg}, mergedMessages...)
+			})
+			startIndex = 1 // Start processing from the second message
+		} else {
+			// Add system prompt as standalone user message
+			history = append(history, map[string]interface{}{
+				"userInputMessage": map[string]interface{}{
+					"content": system,
+					"modelId": kiroModel,
+					"origin":  "AI_EDITOR",
+				},
+			})
 		}
 	}
 
-	// Step 3: Build history and current message
-	var history []map[string]interface{}
-
-	// Process all except last as history
-	for i := 0; i < len(mergedMessages)-1; i++ {
+	// Process messages from startIndex to second-to-last as history
+	for i := startIndex; i < len(mergedMessages)-1; i++ {
 		msg := mergedMessages[i]
 		if msg.Role == "user" {
 			content := msg.UserContent.Text
@@ -671,13 +698,10 @@ func parseAssistantContent(content json.RawMessage) ParsedAssistantContent {
 				_ = json.Unmarshal(block.Input, &input)
 			}
 
-			// Skip tool uses with empty input - Kiro API rejects them with "Improperly formed request"
-			// Empty input can be: nil, empty object {}, or empty map
+			// Normalize nil input to empty object (matches Node.js behavior)
+			// Tools like TaskList have input: {} which is valid for Kiro API
 			if input == nil {
-				continue
-			}
-			if inputMap, ok := input.(map[string]interface{}); ok && len(inputMap) == 0 {
-				continue
+				input = map[string]interface{}{}
 			}
 
 			toolUse := map[string]interface{}{
@@ -762,6 +786,128 @@ func deduplicateToolResults(toolResults []map[string]interface{}) []map[string]i
 		}
 	}
 	return unique
+}
+
+
+// generateToolsFromHistory generates minimal tool definitions from tool names found in history.
+// This is used when the request doesn't include tools but history contains toolUses.
+// Kiro API requires tools definition when history contains toolUses.
+func generateToolsFromHistory(toolNames map[string]bool) []map[string]interface{} {
+	if len(toolNames) == 0 {
+		return nil
+	}
+
+	var kiroTools []map[string]interface{}
+	for name := range toolNames {
+		// Generate minimal tool definition with empty schema
+		// The actual schema doesn't matter for history replay, only the name is required
+		kiroTool := map[string]interface{}{
+			"toolSpecification": map[string]interface{}{
+				"name":        name,
+				"description": "Tool used in conversation history",
+				"inputSchema": map[string]interface{}{
+					"json": json.RawMessage(`{"type":"object"}`),
+				},
+			},
+		}
+		kiroTools = append(kiroTools, kiroTool)
+	}
+	return kiroTools
+}
+
+// InjectToolsFromHistory extracts tool names from history in the request body
+// and injects minimal tools definitions. This is used to fix "Improperly formed request"
+// errors when history contains toolUses but no tools definition was provided.
+// Returns the modified request body, or the original if no modification needed.
+func InjectToolsFromHistory(reqBody []byte) ([]byte, bool) {
+	var request map[string]interface{}
+	if err := json.Unmarshal(reqBody, &request); err != nil {
+		return reqBody, false
+	}
+
+	convState, ok := request["conversationState"].(map[string]interface{})
+	if !ok {
+		return reqBody, false
+	}
+
+	// Check if tools already exist in currentMessage
+	if currentMsg, ok := convState["currentMessage"].(map[string]interface{}); ok {
+		if userInput, ok := currentMsg["userInputMessage"].(map[string]interface{}); ok {
+			if ctx, ok := userInput["userInputMessageContext"].(map[string]interface{}); ok {
+				if _, hasTools := ctx["tools"]; hasTools {
+					// Tools already present, no need to inject
+					return reqBody, false
+				}
+			}
+		}
+	}
+
+	// Extract tool names from history
+	history, ok := convState["history"].([]interface{})
+	if !ok || len(history) == 0 {
+		return reqBody, false
+	}
+
+	toolNames := make(map[string]bool)
+	for _, item := range history {
+		itemMap, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		assistantMsg, ok := itemMap["assistantResponseMessage"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		toolUses, ok := assistantMsg["toolUses"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, tu := range toolUses {
+			tuMap, ok := tu.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if name, ok := tuMap["name"].(string); ok && name != "" {
+				toolNames[name] = true
+			}
+		}
+	}
+
+	if len(toolNames) == 0 {
+		return reqBody, false
+	}
+
+	// Generate and inject tools
+	kiroTools := generateToolsFromHistory(toolNames)
+	if len(kiroTools) == 0 {
+		return reqBody, false
+	}
+
+	// Inject tools into userInputMessageContext
+	currentMsg, ok := convState["currentMessage"].(map[string]interface{})
+	if !ok {
+		currentMsg = make(map[string]interface{})
+		convState["currentMessage"] = currentMsg
+	}
+	userInput, ok := currentMsg["userInputMessage"].(map[string]interface{})
+	if !ok {
+		userInput = make(map[string]interface{})
+		currentMsg["userInputMessage"] = userInput
+	}
+	ctx, ok := userInput["userInputMessageContext"].(map[string]interface{})
+	if !ok {
+		ctx = make(map[string]interface{})
+		userInput["userInputMessageContext"] = ctx
+	}
+	ctx["tools"] = kiroTools
+
+	// Marshal back to JSON
+	modifiedBody, err := json.Marshal(request)
+	if err != nil {
+		return reqBody, false
+	}
+
+	return modifiedBody, true
 }
 
 // extractTextContent extracts text content from Claude message content.
@@ -864,6 +1010,9 @@ func convertToolsToKiroFormat(toolsJSON []byte) []map[string]interface{} {
 			inputSchema = []byte("{}")
 		}
 
+		// Sanitize schema: remove $-prefixed property names that Kiro API rejects
+		inputSchema = sanitizeToolSchema(inputSchema)
+
 		kiroTool := map[string]interface{}{
 			"toolSpecification": map[string]interface{}{
 				"name":        tool.Name,
@@ -879,7 +1028,110 @@ func convertToolsToKiroFormat(toolsJSON []byte) []map[string]interface{} {
 	return kiroTools
 }
 
+// sanitizeToolSchema removes $-prefixed property names from JSON Schema properties.
+// The Kiro API rejects tool schemas containing $-prefixed property names (e.g., $expand,
+// $select, $skip, $top) as it treats them as reserved JSON Schema keywords.
+// Only modifies the schema if $-prefixed properties are found; returns original bytes otherwise.
+func sanitizeToolSchema(schemaJSON json.RawMessage) json.RawMessage {
+	var schema map[string]interface{}
+	if err := json.Unmarshal(schemaJSON, &schema); err != nil {
+		return schemaJSON
+	}
+
+	if !sanitizeSchemaProperties(schema) {
+		return schemaJSON // No changes needed
+	}
+
+	result, err := json.Marshal(schema)
+	if err != nil {
+		return schemaJSON
+	}
+	return result
+}
+
+// sanitizeSchemaProperties recursively removes $-prefixed keys from properties objects.
+// Returns true if any modifications were made.
+func sanitizeSchemaProperties(schema map[string]interface{}) bool {
+	modified := false
+
+	// Remove $-prefixed keys from properties
+	if props, ok := schema["properties"].(map[string]interface{}); ok {
+		for key := range props {
+			if strings.HasPrefix(key, "$") {
+				delete(props, key)
+				modified = true
+			}
+		}
+
+		// Clean up required array to remove references to deleted properties
+		if modified {
+			if required, ok := schema["required"].([]interface{}); ok {
+				var cleaned []interface{}
+				for _, r := range required {
+					if s, ok := r.(string); ok && strings.HasPrefix(s, "$") {
+						continue
+					}
+					cleaned = append(cleaned, r)
+				}
+				if len(cleaned) != len(required) {
+					schema["required"] = cleaned
+				}
+			}
+		}
+
+		// Recurse into remaining property schemas
+		for _, propSchema := range props {
+			if nested, ok := propSchema.(map[string]interface{}); ok {
+				if sanitizeSchemaProperties(nested) {
+					modified = true
+				}
+			}
+		}
+	}
+
+	// Recurse into nested schemas
+	for _, key := range []string{"items", "additionalProperties"} {
+		if nested, ok := schema[key].(map[string]interface{}); ok {
+			if sanitizeSchemaProperties(nested) {
+				modified = true
+			}
+		}
+	}
+
+	// Recurse into array schemas (anyOf, allOf, oneOf)
+	for _, key := range []string{"anyOf", "allOf", "oneOf"} {
+		if arr, ok := schema[key].([]interface{}); ok {
+			for _, item := range arr {
+				if nested, ok := item.(map[string]interface{}); ok {
+					if sanitizeSchemaProperties(nested) {
+						modified = true
+					}
+				}
+			}
+		}
+	}
+
+	return modified
+}
+
 // Close closes the client and releases resources.
 func (c *Client) Close() {
 	c.httpClient.CloseIdleConnections()
+}
+
+// MarshalWithoutHTMLEscape marshals v to JSON without HTML escaping.
+// Go's json.Marshal escapes <, >, & by default; this function preserves them as-is.
+func MarshalWithoutHTMLEscape(v interface{}) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	// Encode appends a trailing newline; trim it
+	b := buf.Bytes()
+	if len(b) > 0 && b[len(b)-1] == '\n' {
+		b = b[:len(b)-1]
+	}
+	return b, nil
 }

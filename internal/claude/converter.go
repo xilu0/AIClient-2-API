@@ -20,6 +20,7 @@ type Converter struct {
 	inToolUse        bool
 	toolUseStartSent bool
 	hadToolUse       bool // Track if any tool use blocks were processed (for stop_reason)
+	inputDeltaSent   bool // Track if input_json_delta has been sent for current tool_use
 
 	// Content block state tracking (for proper SSE event ordering)
 	textBlockStarted    bool // Track if a text content block is open and needs closing
@@ -209,10 +210,11 @@ func (c *Converter) convertToolUse(chunk *kiro.KiroChunk) ([]*SSEEvent, error) {
 			}
 			events = append(events, &SSEEvent{Type: "content_block_stop", Data: stopEvent})
 			c.textBlockStarted = false
+			// Increment content index ONLY after closing a preceding text block
+			// This ensures tool_use-only responses start at index 0
+			c.contentIndex++
 		}
 
-		// Increment content index for the new tool_use block
-		c.contentIndex++
 		c.inToolUse = true
 		c.toolUseStartSent = true
 		c.hadToolUse = true // Mark that we've processed a tool use block
@@ -230,6 +232,9 @@ func (c *Converter) convertToolUse(chunk *kiro.KiroChunk) ([]*SSEEvent, error) {
 		}
 		events = append(events, &SSEEvent{Type: "content_block_start", Data: contentBlockStart})
 
+		// Reset inputDeltaSent for new tool_use block
+		c.inputDeltaSent = false
+
 		// If the start chunk also contains input, send it immediately as a delta
 		if chunk.Input != "" {
 			c.outputBuilder.WriteString(chunk.Input)
@@ -238,10 +243,11 @@ func (c *Converter) convertToolUse(chunk *kiro.KiroChunk) ([]*SSEEvent, error) {
 				Index: c.contentIndex,
 				Delta: DeltaBlock{
 					Type:        "input_json_delta",
-					PartialJSON: chunk.Input,
+					PartialJSON: strPtr(chunk.Input),
 				},
 			}
 			events = append(events, &SSEEvent{Type: "content_block_delta", Data: inputDelta})
+			c.inputDeltaSent = true
 		}
 
 		return events, nil
@@ -257,24 +263,44 @@ func (c *Converter) convertToolUse(chunk *kiro.KiroChunk) ([]*SSEEvent, error) {
 			Index: c.contentIndex,
 			Delta: DeltaBlock{
 				Type:        "input_json_delta",
-				PartialJSON: chunk.Input,
+				PartialJSON: strPtr(chunk.Input),
 			},
 		}
+		c.inputDeltaSent = true
 
 		return []*SSEEvent{{Type: "content_block_delta", Data: event}}, nil
 	}
 
 	// Send stop event when tool use is complete
 	if c.inToolUse && chunk.Stop {
+		var events []*SSEEvent
+
+		// CRITICAL: Always send at least one input_json_delta before content_block_stop
+		// Claude API clients expect this event, even if input is empty
+		// Node.js implementation sends JSON.stringify({}) = "{}", so we must match that behavior
+		if !c.inputDeltaSent {
+			emptyJSON := "{}"
+			inputDelta := ContentBlockDeltaEvent{
+				Type:  "content_block_delta",
+				Index: c.contentIndex,
+				Delta: DeltaBlock{
+					Type:        "input_json_delta",
+					PartialJSON: &emptyJSON, // Empty JSON object to match Node.js behavior
+				},
+			}
+			events = append(events, &SSEEvent{Type: "content_block_delta", Data: inputDelta})
+		}
+
 		c.inToolUse = false
 		c.toolUseStartSent = false
 
-		event := ContentBlockStopEvent{
+		stopEvent := ContentBlockStopEvent{
 			Type:  "content_block_stop",
 			Index: c.contentIndex,
 		}
+		events = append(events, &SSEEvent{Type: "content_block_stop", Data: stopEvent})
 
-		return []*SSEEvent{{Type: "content_block_stop", Data: event}}, nil
+		return events, nil
 	}
 
 	return nil, nil
@@ -536,4 +562,10 @@ func (c *Converter) WasMessageDeltaEmitted() bool {
 func (c *Converter) MarkContentBlockClosed() {
 	c.textBlockStarted = false
 	c.inToolUse = false
+}
+
+// strPtr returns a pointer to the given string.
+// Used for JSON serialization where we need to distinguish nil vs empty string.
+func strPtr(s string) *string {
+	return &s
 }

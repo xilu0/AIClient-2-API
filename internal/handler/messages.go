@@ -238,8 +238,10 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 		}
 
 		// Build request body - include profileARN for social auth method and tools
-		messagesJSON, _ := json.Marshal(req.Messages)
-		toolsJSON, _ := json.Marshal(req.Tools)
+		// Use MarshalWithoutHTMLEscape to avoid Go's default HTML escaping of <, >, &
+		// which causes "Improperly formed request" errors from Kiro API
+		messagesJSON, _ := kiro.MarshalWithoutHTMLEscape(req.Messages)
+		toolsJSON, _ := kiro.MarshalWithoutHTMLEscape(req.Tools)
 		reqBody, metadata, err := kiro.BuildRequestBody(req.Model, messagesJSON, req.MaxTokens, true, req.GetSystemString(), acc.ProfileARN, toolsJSON)
 		if err != nil {
 			if debugSession != nil {
@@ -315,6 +317,48 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 						"Input context is too long. Please compact or reduce your conversation history to continue. " +
 							"Consider using /compact command or starting a new conversation."))
 					return
+				}
+				// Check for "Improperly formed request" - try to fix by injecting tools from history
+				if apiErr.IsImproperlyFormedRequest() {
+					modifiedBody, modified := kiro.InjectToolsFromHistory(reqBody)
+					if modified {
+						h.logger.Info("Attempting to fix improperly formed request by injecting tools from history",
+							"uuid", acc.UUID,
+							"model", req.Model)
+
+						// Retry with modified request body
+						kiroReq.Body = modifiedBody
+						retryBody, retryErr := h.kiroClient.SendStreamingRequest(ctx, kiroReq)
+						if retryErr == nil {
+							// Success! Continue with the response
+							h.logger.Info("Fixed improperly formed request successfully",
+								"uuid", acc.UUID,
+								"model", req.Model)
+
+							// Increment usage
+							_ = h.poolManager.IncrementUsage(ctx, acc.UUID)
+
+							// Stream the response
+							hasException := h.streamResponse(ctx, retryBody, sseWriter, req.Model, estimatedInputTokens, acc.UUID, startTime, debugSession)
+							if err := retryBody.Close(); err != nil {
+								h.logger.Warn("failed to close response body", "error", err)
+							}
+
+							if debugSession != nil {
+								if hasException {
+									debugSession.SetErrorType("stream_exception")
+									debugSession.Fail(fmt.Errorf("received exception during streaming"))
+								} else {
+									debugSession.Success()
+								}
+							}
+							return
+						}
+						// Retry also failed, continue with normal error handling
+						h.logger.Warn("Retry with injected tools also failed",
+							"uuid", acc.UUID,
+							"error", retryErr)
+					}
 				}
 				if apiErr.IsBadRequest() {
 					// 400 Bad Request - likely model not supported by this account
@@ -403,7 +447,7 @@ func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, ss
 		select {
 		case <-ctx.Done():
 			// Send final events on context cancellation
-			h.sendFinalStreamEvents(sseWriter, converter, model, accountUUID, startTime)
+			h.sendFinalStreamEvents(sseWriter, converter, model, accountUUID, startTime, debugSession)
 			return exceptionReceived
 		default:
 		}
@@ -412,7 +456,7 @@ func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, ss
 		if err != nil {
 			if err == io.EOF {
 				// End of stream - send final events
-				h.sendFinalStreamEvents(sseWriter, converter, model, accountUUID, startTime)
+				h.sendFinalStreamEvents(sseWriter, converter, model, accountUUID, startTime, debugSession)
 			} else {
 				h.logger.Error("error reading response", "error", err)
 			}
@@ -485,7 +529,7 @@ func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, ss
 
 // sendFinalStreamEvents sends the final SSE events at the end of a stream.
 // Uses the converter's state to avoid sending duplicate events.
-func (h *MessagesHandler) sendFinalStreamEvents(sseWriter *claude.SSEWriter, converter *claude.Converter, model string, accountUUID string, startTime time.Time) {
+func (h *MessagesHandler) sendFinalStreamEvents(sseWriter *claude.SSEWriter, converter *claude.Converter, model string, accountUUID string, startTime time.Time, debugSession *debug.Session) {
 	// Get final usage from converter
 	finalUsage := converter.GetFinalUsage()
 
@@ -504,8 +548,16 @@ func (h *MessagesHandler) sendFinalStreamEvents(sseWriter *claude.SSEWriter, con
 	// Send content_block_stop only if there's an unclosed content block
 	// The converter tracks this state and handles closing text blocks before tool_use
 	if converter.HasOpenContentBlock() {
+		contentBlockStopEvent := claude.ContentBlockStopEvent{
+			Type:  "content_block_stop",
+			Index: converter.GetCurrentContentIndex(),
+		}
 		if err := sseWriter.WriteContentBlockStop(converter.GetCurrentContentIndex()); err != nil {
 			h.logger.Error("failed to write content_block_stop", "error", err)
+		}
+		// Log to debug session
+		if debugSession != nil {
+			debugSession.AppendClaudeChunk("content_block_stop", contentBlockStopEvent)
 		}
 		converter.MarkContentBlockClosed()
 	}
@@ -529,11 +581,22 @@ func (h *MessagesHandler) sendFinalStreamEvents(sseWriter *claude.SSEWriter, con
 		if err := sseWriter.WriteEvent("message_delta", messageDeltaEvent); err != nil {
 			h.logger.Error("failed to write message_delta", "error", err)
 		}
+		// Log to debug session
+		if debugSession != nil {
+			debugSession.AppendClaudeChunk("message_delta", messageDeltaEvent)
+		}
 	}
 
 	// Send message_stop
+	messageStopEvent := claude.MessageStopEvent{
+		Type: "message_stop",
+	}
 	if err := sseWriter.WriteMessageStop(); err != nil {
 		h.logger.Error("failed to write message_stop", "error", err)
+	}
+	// Log to debug session
+	if debugSession != nil {
+		debugSession.AppendClaudeChunk("message_stop", messageStopEvent)
 	}
 }
 
@@ -598,8 +661,9 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 
 		// Build request body - use stream=true internally to receive chunks
 		// Include profileARN for social auth method and tools
-		messagesJSON, _ := json.Marshal(req.Messages)
-		toolsJSON, _ := json.Marshal(req.Tools)
+		// Use MarshalWithoutHTMLEscape to avoid Go's default HTML escaping of <, >, &
+		messagesJSON, _ := kiro.MarshalWithoutHTMLEscape(req.Messages)
+		toolsJSON, _ := kiro.MarshalWithoutHTMLEscape(req.Tools)
 		reqBody, metadata, err := kiro.BuildRequestBody(req.Model, messagesJSON, req.MaxTokens, true, req.GetSystemString(), acc.ProfileARN, toolsJSON)
 		if err != nil {
 			if debugSession != nil {
@@ -675,6 +739,64 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 						"Input context is too long. Please compact or reduce your conversation history to continue. "+
 							"Consider using /compact command or starting a new conversation."))
 					return
+				}
+				// Check for "Improperly formed request" - try to fix by injecting tools from history
+				if apiErr.IsImproperlyFormedRequest() {
+					modifiedBody, modified := kiro.InjectToolsFromHistory(reqBody)
+					if modified {
+						h.logger.Info("Attempting to fix improperly formed request by injecting tools from history",
+							"uuid", acc.UUID,
+							"model", req.Model)
+
+						// Retry with modified request body
+						kiroReq.Body = modifiedBody
+						retryBody, retryErr := h.kiroClient.SendStreamingRequest(ctx, kiroReq)
+						if retryErr == nil {
+							// Success! Continue with the response
+							h.logger.Info("Fixed improperly formed request successfully",
+								"uuid", acc.UUID,
+								"model", req.Model)
+
+							// Increment usage
+							_ = h.poolManager.IncrementUsage(ctx, acc.UUID)
+
+							// Aggregate the response
+							response, hasException := h.aggregateResponse(ctx, retryBody, req.Model, estimatedInputTokens, acc.UUID, startTime, debugSession)
+							if err := retryBody.Close(); err != nil {
+								h.logger.Warn("failed to close response body", "error", err)
+							}
+
+							if response == nil {
+								if debugSession != nil {
+									debugSession.SetError(fmt.Errorf("failed to aggregate response"))
+									debugSession.Fail(fmt.Errorf("failed to aggregate response"))
+								}
+								h.writeError(w, claude.NewAPIError("Failed to aggregate response"))
+								return
+							}
+
+							if debugSession != nil {
+								if hasException {
+									debugSession.SetErrorType("stream_exception")
+									debugSession.Fail(fmt.Errorf("received exception during streaming"))
+								} else {
+									debugSession.Success()
+								}
+							}
+
+							// Write JSON response
+							w.Header().Set("Content-Type", "application/json")
+							w.WriteHeader(http.StatusOK)
+							if err := json.NewEncoder(w).Encode(response); err != nil {
+								h.logger.Error("failed to write response", "error", err)
+							}
+							return
+						}
+						// Retry also failed, continue with normal error handling
+						h.logger.Warn("Retry with injected tools also failed",
+							"uuid", acc.UUID,
+							"error", retryErr)
+					}
 				}
 				if apiErr.IsBadRequest() {
 					// 400 Bad Request - likely model not supported by this account
