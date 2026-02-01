@@ -31,7 +31,8 @@ services:
       - REDIS_ENABLED=true
       - REDIS_URL=redis://redis:6379
       - "REDIS_KEY_PREFIX=aiclient:"
-      - KIRO_DEBUG_DUMP=true
+      - KIRO_DEBUG_DUMP=false
+      - KIRO_DEBUG_DIR=/tmp/kiro-debug
     networks:
       - aiclient-network
     depends_on:
@@ -60,7 +61,7 @@ services:
       - GO_KIRO_LOG_LEVEL=info
       - GO_KIRO_LOG_JSON=true
       - GO_KIRO_HEALTH_COOLDOWN=60s
-      - GO_KIRO_DEBUG_DUMP=true
+      - GO_KIRO_DEBUG_DUMP=false
     depends_on:
       redis:
         condition: service_healthy

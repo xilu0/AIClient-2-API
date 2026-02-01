@@ -40,4 +40,4 @@ get-dump:
 	docker cp aiclient-go-kiro:/tmp/kiro-debug ./
 
 get-dump-js:
-	docker cp aiclient2api:/app/kiro-debug/nodejs kiro-debug
+	docker cp aiclient2api:/tmp/kiro-debug kiro-debug-js
