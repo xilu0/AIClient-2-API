@@ -230,9 +230,9 @@ func TestBuildRequestBody_EmptyContentFallback(t *testing.T) {
 	assert.Equal(t, "Tool results provided.", userMsg["content"])
 }
 
-func TestBuildRequestBody_FilterEmptyInputToolUseAndResult(t *testing.T) {
-	// Test that tool_use with empty input is filtered, along with its corresponding tool_result
-	// This prevents "Improperly formed request" errors from Kiro API
+func TestBuildRequestBody_PreservesEmptyInputToolUseAndResult(t *testing.T) {
+	// Test that tool_use with empty input is preserved (not filtered).
+	// Tools like TaskList have input: {} which is valid for Kiro API.
 	messages := []map[string]interface{}{
 		{
 			"role":    "user",
@@ -245,13 +245,13 @@ func TestBuildRequestBody_FilterEmptyInputToolUseAndResult(t *testing.T) {
 					"type":  "tool_use",
 					"id":    "tool_valid",
 					"name":  "valid_tool",
-					"input": map[string]string{"arg": "value"}, // Valid - has input
+					"input": map[string]string{"arg": "value"},
 				},
 				{
 					"type":  "tool_use",
 					"id":    "tool_empty",
 					"name":  "empty_tool",
-					"input": map[string]string{}, // Empty input - should be filtered
+					"input": map[string]string{}, // Empty input - should be preserved
 				},
 			},
 		},
@@ -266,7 +266,7 @@ func TestBuildRequestBody_FilterEmptyInputToolUseAndResult(t *testing.T) {
 				{
 					"type":        "tool_result",
 					"tool_use_id": "tool_empty",
-					"content":     "Empty tool result - should be filtered",
+					"content":     "Empty tool result - should be preserved",
 				},
 			},
 		},
@@ -286,28 +286,31 @@ func TestBuildRequestBody_FilterEmptyInputToolUseAndResult(t *testing.T) {
 
 	// Expected structure:
 	// 1. User: "Run tools"
-	// 2. Assistant: Only tool_valid (tool_empty filtered)
+	// 2. Assistant: Both tool_valid and tool_empty preserved
 
 	require.Len(t, history, 2)
 
-	// Check assistant message - should only have one tool_use
+	// Check assistant message - should have both tool_uses
 	assistantMsg := history[1].(map[string]interface{})["assistantResponseMessage"].(map[string]interface{})
 	toolUses := assistantMsg["toolUses"].([]interface{})
-	assert.Len(t, toolUses, 1)
+	assert.Len(t, toolUses, 2)
 	assert.Equal(t, "tool_valid", toolUses[0].(map[string]interface{})["toolUseId"])
+	assert.Equal(t, "tool_empty", toolUses[1].(map[string]interface{})["toolUseId"])
 
-	// Check currentMessage - should only have one tool_result
+	// Check currentMessage - should have both tool_results
 	currentMsg := convState["currentMessage"].(map[string]interface{})
 	userInput := currentMsg["userInputMessage"].(map[string]interface{})
 	context := userInput["userInputMessageContext"].(map[string]interface{})
 	toolResults := context["toolResults"].([]interface{})
 
-	assert.Len(t, toolResults, 1)
+	assert.Len(t, toolResults, 2)
 	assert.Equal(t, "tool_valid", toolResults[0].(map[string]interface{})["toolUseId"])
+	assert.Equal(t, "tool_empty", toolResults[1].(map[string]interface{})["toolUseId"])
 }
 
-func TestBuildRequestBody_FilterAllEmptyInputToolUses(t *testing.T) {
-	// Test when ALL tool_uses have empty input - both tool_uses and tool_results should be filtered
+func TestBuildRequestBody_PreservesAllEmptyInputToolUses(t *testing.T) {
+	// Test when ALL tool_uses have empty input - they should all be preserved (not filtered).
+	// This matches Node.js behavior where TaskList with input: {} works correctly.
 	messages := []map[string]interface{}{
 		{
 			"role":    "user",
@@ -319,8 +322,8 @@ func TestBuildRequestBody_FilterAllEmptyInputToolUses(t *testing.T) {
 				{
 					"type":  "tool_use",
 					"id":    "tool_empty_1",
-					"name":  "empty_tool_1",
-					"input": map[string]string{}, // Empty input
+					"name":  "TaskList",
+					"input": map[string]string{}, // Empty input - should be preserved
 				},
 			},
 		},
@@ -330,7 +333,7 @@ func TestBuildRequestBody_FilterAllEmptyInputToolUses(t *testing.T) {
 				{
 					"type":        "tool_result",
 					"tool_use_id": "tool_empty_1",
-					"content":     "Result for empty tool",
+					"content":     "Result for TaskList",
 				},
 			},
 		},
@@ -350,23 +353,29 @@ func TestBuildRequestBody_FilterAllEmptyInputToolUses(t *testing.T) {
 
 	// Expected structure:
 	// 1. User: "Run tools"
-	// 2. Assistant: No toolUses (filtered)
+	// 2. Assistant: toolUses with TaskList preserved
 
 	require.Len(t, history, 2)
 
-	// Check assistant message - should have no toolUses key
+	// Check assistant message - should have toolUses with the empty-input tool
 	assistantMsg := history[1].(map[string]interface{})["assistantResponseMessage"].(map[string]interface{})
-	_, hasToolUses := assistantMsg["toolUses"]
-	assert.False(t, hasToolUses, "toolUses should not be present when all are filtered")
+	toolUses, hasToolUses := assistantMsg["toolUses"].([]interface{})
+	assert.True(t, hasToolUses, "toolUses should be present for empty-input tools")
+	require.Len(t, toolUses, 1)
+	assert.Equal(t, "tool_empty_1", toolUses[0].(map[string]interface{})["toolUseId"])
+	assert.Equal(t, "TaskList", toolUses[0].(map[string]interface{})["name"])
 
-	// Check currentMessage - should have no userInputMessageContext (no tool results)
+	// Check currentMessage - should have tool results
 	currentMsg := convState["currentMessage"].(map[string]interface{})
 	userInput := currentMsg["userInputMessage"].(map[string]interface{})
-	_, hasContext := userInput["userInputMessageContext"]
-	assert.False(t, hasContext, "userInputMessageContext should not be present when all tool results are filtered")
+	context, hasContext := userInput["userInputMessageContext"].(map[string]interface{})
+	assert.True(t, hasContext, "userInputMessageContext should be present with tool results")
+	toolResults := context["toolResults"].([]interface{})
+	require.Len(t, toolResults, 1)
+	assert.Equal(t, "tool_empty_1", toolResults[0].(map[string]interface{})["toolUseId"])
 
-	// Content should be "Continue" since there's no text and no tool results
-	assert.Equal(t, "Continue", userInput["content"])
+	// Content should be "Tool results provided." since there are tool results
+	assert.Equal(t, "Tool results provided.", userInput["content"])
 }
 func TestInjectToolsFromHistory_NoToolsNeeded(t *testing.T) {
 	// Test when history has no toolUses - should not modify
