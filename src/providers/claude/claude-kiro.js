@@ -50,6 +50,61 @@ const KIRO_CONSTANTS = {
     TOTAL_CONTEXT_TOKENS: 172500, // 总上下文 173k tokens
 };
 
+// Debug dump functionality (enabled via KIRO_DEBUG_DUMP=true environment variable)
+// Uses same base directory as Go service for easy comparison
+const KIRO_DEBUG_DIR = process.env.KIRO_DEBUG_DIR || '/app/kiro-debug';
+
+/**
+ * Check if debug dump is enabled (checked at runtime, not module load time)
+ */
+function isDebugDumpEnabled() {
+    return process.env.KIRO_DEBUG_DUMP === 'true';
+}
+
+/**
+ * Dump Kiro request to file for debugging
+ * @param {string} sessionId - Unique session ID
+ * @param {Object} requestData - The Kiro request data
+ * @param {Object} originalRequest - The original Claude API request
+ * @param {Object} metadata - Additional metadata
+ */
+async function dumpKiroRequest(sessionId, requestData, originalRequest, metadata = {}) {
+    if (!isDebugDumpEnabled()) return;
+
+    try {
+        // Use 'nodejs' subdirectory to distinguish from Go dumps
+        const dumpDir = path.join(KIRO_DEBUG_DIR, 'nodejs', sessionId);
+        await fs.mkdir(dumpDir, { recursive: true });
+
+        // Dump Kiro request
+        await fs.writeFile(
+            path.join(dumpDir, 'kiro_request.json'),
+            JSON.stringify(requestData, null, 2)
+        );
+
+        // Dump original Claude request
+        await fs.writeFile(
+            path.join(dumpDir, 'request.json'),
+            JSON.stringify(originalRequest, null, 2)
+        );
+
+        // Dump metadata
+        await fs.writeFile(
+            path.join(dumpDir, 'metadata.json'),
+            JSON.stringify({
+                session_id: sessionId,
+                source: 'nodejs',
+                timestamp: new Date().toISOString(),
+                ...metadata
+            }, null, 2)
+        );
+
+        console.log(`[Kiro Debug] Dumped request to ${dumpDir}`);
+    } catch (err) {
+        console.error(`[Kiro Debug] Failed to dump request: ${err.message}`);
+    }
+}
+
 // 从 provider-models.js 获取支持的模型列表
 const KIRO_MODELS = getProviderModels('claude-kiro-oauth');
 
@@ -93,6 +148,62 @@ function generateMachineIdFromConfig(credentials) {
     // 优先级：节点UUID > profileArn > clientId > fallback
     const uniqueKey = credentials.uuid || credentials.profileArn || credentials.clientId || "KIRO_DEFAULT_MACHINE";
     return crypto.createHash('sha256').update(uniqueKey).digest('hex');
+}
+
+/**
+ * Sanitize tool schema by removing $-prefixed property names from properties objects.
+ * The Kiro API rejects schemas with $-prefixed property names (e.g., $expand, $select)
+ * as it treats them as reserved JSON Schema keywords.
+ * @param {Object} schema - The input_schema object
+ * @returns {Object} Sanitized schema (returns original if no changes needed)
+ */
+function sanitizeToolSchema(schema) {
+    if (!schema || typeof schema !== 'object') return schema;
+
+    function sanitizeProps(obj) {
+        let modified = false;
+        if (obj.properties && typeof obj.properties === 'object') {
+            for (const key of Object.keys(obj.properties)) {
+                if (key.startsWith('$')) {
+                    delete obj.properties[key];
+                    modified = true;
+                }
+            }
+            // Clean up required array
+            if (modified && Array.isArray(obj.required)) {
+                obj.required = obj.required.filter(r => !r.startsWith('$'));
+            }
+            // Recurse into remaining property schemas
+            for (const propSchema of Object.values(obj.properties)) {
+                if (propSchema && typeof propSchema === 'object') {
+                    if (sanitizeProps(propSchema)) modified = true;
+                }
+            }
+        }
+        // Recurse into nested schemas
+        for (const key of ['items', 'additionalProperties']) {
+            if (obj[key] && typeof obj[key] === 'object') {
+                if (sanitizeProps(obj[key])) modified = true;
+            }
+        }
+        for (const key of ['anyOf', 'allOf', 'oneOf']) {
+            if (Array.isArray(obj[key])) {
+                for (const item of obj[key]) {
+                    if (item && typeof item === 'object') {
+                        if (sanitizeProps(item)) modified = true;
+                    }
+                }
+            }
+        }
+        return modified;
+    }
+
+    // Deep clone to avoid mutating the original
+    const cloned = JSON.parse(JSON.stringify(schema));
+    if (sanitizeProps(cloned)) {
+        return cloned;
+    }
+    return schema; // Return original reference if no changes
 }
 
 /**
@@ -995,12 +1106,15 @@ export class KiroApiService {
                         console.log(`[Kiro] Tool '${tool.name}' has long description: ${desc.length} chars`);
                     }
 
+                    // Sanitize schema: remove $-prefixed property names that Kiro API rejects
+                    const schema = sanitizeToolSchema(tool.input_schema || {});
+
                     return {
                         toolSpecification: {
                             name: tool.name,
                             description: desc,
                             inputSchema: {
-                                json: tool.input_schema || {}
+                                json: schema
                             }
                         }
                     };
@@ -1442,10 +1556,20 @@ export class KiroApiService {
 
         try {
             const token = this.accessToken; // Use the already initialized token
+            const sessionId = uuidv4();
             const headers = {
                 'Authorization': `Bearer ${token}`,
-                'amz-sdk-invocation-id': `${uuidv4()}`,
+                'amz-sdk-invocation-id': sessionId,
             };
+
+            // Debug dump before sending request
+            await dumpKiroRequest(sessionId, requestData, body, {
+                model,
+                uuid: this.uuid,
+                authMethod: this.authMethod,
+                profileArn: this.profileArn,
+                region: this.region
+            });
 
             // 当 model 以 kiro-amazonq 开头时，使用 amazonQUrl，否则使用 baseUrl
             const requestUrl = model.startsWith('amazonq') ? this.amazonQUrl : this.baseUrl;
@@ -1936,11 +2060,21 @@ export class KiroApiService {
 
         const requestData = this.buildCodewhispererRequest(messages, model, body.tools, body.system, body.thinking);
         const token = this.accessToken;
+        const sessionId = uuidv4();
         const headers = {
             'Authorization': `Bearer ${token}`,
-            'amz-sdk-invocation-id': `${uuidv4()}`,
+            'amz-sdk-invocation-id': sessionId,
         };
         const requestUrl = model.startsWith('amazonq') ? this.amazonQUrl : this.baseUrl;
+
+        // Debug dump before sending request
+        await dumpKiroRequest(sessionId, requestData, body, {
+            model,
+            uuid: this.uuid,
+            authMethod: this.authMethod,
+            profileArn: this.profileArn,
+            region: this.region
+        });
 
         // 使用循环替代递归重试
         let currentRetryCount = retryCount;
