@@ -349,6 +349,8 @@ func TestConvertKiroToolUse(t *testing.T) {
 	data, ok := toolUseStart.Data.(claude.ContentBlockStartEvent)
 	require.True(t, ok, "expected ContentBlockStartEvent, got %T", toolUseStart.Data)
 
+	// Index should be 0 when there's no preceding text content
+	assert.Equal(t, 0, data.Index)
 	assert.Equal(t, "tool_use", data.ContentBlock.Type)
 	assert.Equal(t, "tool_abc123", data.ContentBlock.ID)
 	assert.Equal(t, "get_weather", data.ContentBlock.Name)
@@ -606,10 +608,93 @@ func TestConverterToolUseOnly(t *testing.T) {
 	}
 	require.NotNil(t, toolStart, "expected tool_use content_block_start")
 
-	// Tool use should be at index 1 (index 0 would be text if there was any,
-	// but the converter increments before creating tool_use block)
-	assert.Equal(t, 1, toolStart.Index)
+	// Tool use should be at index 0 when there's no preceding text content
+	// (index increments only when closing a text block before tool_use)
+	assert.Equal(t, 0, toolStart.Index)
 	assert.Equal(t, "search_files", toolStart.ContentBlock.Name)
+}
+
+// TestConverterToolUseEmptyInput verifies that input_json_delta is always sent, even when Kiro doesn't provide input.
+// This is critical for Claude API compatibility - clients expect at least one input_json_delta event.
+func TestConverterToolUseEmptyInput(t *testing.T) {
+	converter := claude.NewConverter("claude-sonnet-4")
+
+	// First chunk: tool use start WITHOUT input (like TaskList from Kiro)
+	startChunk := &kiro.KiroChunk{
+		Name:      "TaskList",
+		ToolUseID: "tooluse_abc123",
+		// Note: NO Input field - this is how Kiro sends tools like TaskList
+	}
+	startEvents, err := converter.Convert(startChunk)
+	require.NoError(t, err)
+	require.NotEmpty(t, startEvents)
+
+	// Verify content_block_start was emitted
+	var hasContentBlockStart bool
+	for _, e := range startEvents {
+		if e.Type == "content_block_start" {
+			hasContentBlockStart = true
+		}
+	}
+	assert.True(t, hasContentBlockStart, "expected content_block_start event")
+
+	// Second chunk: stop event (also without input)
+	stopChunk := &kiro.KiroChunk{
+		Name:      "TaskList",
+		ToolUseID: "tooluse_abc123",
+		Stop:      true,
+	}
+	stopEvents, err := converter.Convert(stopChunk)
+	require.NoError(t, err)
+	require.NotEmpty(t, stopEvents)
+
+	// CRITICAL: Should have input_json_delta with "{}" BEFORE content_block_stop
+	// This matches Node.js behavior and is required by Claude API clients
+	require.GreaterOrEqual(t, len(stopEvents), 2, "expected at least input_json_delta + content_block_stop")
+
+	// First event should be input_json_delta with "{}" (matches Node.js behavior: JSON.stringify({}))
+	assert.Equal(t, "content_block_delta", stopEvents[0].Type)
+	deltaEvent := stopEvents[0].Data.(claude.ContentBlockDeltaEvent)
+	assert.Equal(t, "input_json_delta", deltaEvent.Delta.Type)
+	require.NotNil(t, deltaEvent.Delta.PartialJSON, "partial_json should not be nil")
+	assert.Equal(t, "{}", *deltaEvent.Delta.PartialJSON)
+
+	// Second event should be content_block_stop
+	assert.Equal(t, "content_block_stop", stopEvents[1].Type)
+}
+
+// TestConverterToolUseWithInput verifies that input_json_delta is not duplicated when Kiro provides input.
+func TestConverterToolUseWithInput(t *testing.T) {
+	converter := claude.NewConverter("claude-sonnet-4")
+
+	// First chunk: tool use start WITH input
+	startChunk := &kiro.KiroChunk{
+		Name:      "Read",
+		ToolUseID: "tooluse_def456",
+		Input:     `{"file_path": "/test.txt"}`,
+	}
+	startEvents, err := converter.Convert(startChunk)
+	require.NoError(t, err)
+
+	// Should have input_json_delta in start events
+	var inputDeltaCount int
+	for _, e := range startEvents {
+		if e.Type == "content_block_delta" {
+			inputDeltaCount++
+		}
+	}
+	assert.Equal(t, 1, inputDeltaCount, "expected one input_json_delta in start events")
+
+	// Stop event - should NOT add another input_json_delta since we already sent one
+	stopChunk := &kiro.KiroChunk{
+		Stop: true,
+	}
+	stopEvents, err := converter.Convert(stopChunk)
+	require.NoError(t, err)
+
+	// Should only have content_block_stop (no extra input_json_delta)
+	require.Len(t, stopEvents, 1, "expected only content_block_stop")
+	assert.Equal(t, "content_block_stop", stopEvents[0].Type)
 }
 
 // TestConverterStateTrackingMethods tests the new state tracking methods.
@@ -637,7 +722,7 @@ func TestConverterStateTrackingMethods(t *testing.T) {
 	t.Run("after_tool_use_start", func(t *testing.T) {
 		converter := claude.NewConverter("claude-sonnet-4")
 
-		// Start tool use
+		// Start tool use without preceding text
 		_, _ = converter.Convert(&kiro.KiroChunk{
 			Name:      "test_tool",
 			ToolUseID: "tool_123",
@@ -645,7 +730,8 @@ func TestConverterStateTrackingMethods(t *testing.T) {
 
 		// Tool use block should be open (inToolUse = true)
 		assert.True(t, converter.HasOpenContentBlock())
-		assert.Equal(t, 1, converter.GetCurrentContentIndex()) // incremented for tool_use
+		// Index should be 0 when there's no preceding text block
+		assert.Equal(t, 0, converter.GetCurrentContentIndex())
 	})
 
 	t.Run("after_tool_use_stop", func(t *testing.T) {

@@ -447,7 +447,7 @@ func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, ss
 		select {
 		case <-ctx.Done():
 			// Send final events on context cancellation
-			h.sendFinalStreamEvents(sseWriter, converter, model, accountUUID, startTime)
+			h.sendFinalStreamEvents(sseWriter, converter, model, accountUUID, startTime, debugSession)
 			return exceptionReceived
 		default:
 		}
@@ -456,7 +456,7 @@ func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, ss
 		if err != nil {
 			if err == io.EOF {
 				// End of stream - send final events
-				h.sendFinalStreamEvents(sseWriter, converter, model, accountUUID, startTime)
+				h.sendFinalStreamEvents(sseWriter, converter, model, accountUUID, startTime, debugSession)
 			} else {
 				h.logger.Error("error reading response", "error", err)
 			}
@@ -529,7 +529,7 @@ func (h *MessagesHandler) streamResponse(ctx context.Context, body io.Reader, ss
 
 // sendFinalStreamEvents sends the final SSE events at the end of a stream.
 // Uses the converter's state to avoid sending duplicate events.
-func (h *MessagesHandler) sendFinalStreamEvents(sseWriter *claude.SSEWriter, converter *claude.Converter, model string, accountUUID string, startTime time.Time) {
+func (h *MessagesHandler) sendFinalStreamEvents(sseWriter *claude.SSEWriter, converter *claude.Converter, model string, accountUUID string, startTime time.Time, debugSession *debug.Session) {
 	// Get final usage from converter
 	finalUsage := converter.GetFinalUsage()
 
@@ -548,8 +548,16 @@ func (h *MessagesHandler) sendFinalStreamEvents(sseWriter *claude.SSEWriter, con
 	// Send content_block_stop only if there's an unclosed content block
 	// The converter tracks this state and handles closing text blocks before tool_use
 	if converter.HasOpenContentBlock() {
+		contentBlockStopEvent := claude.ContentBlockStopEvent{
+			Type:  "content_block_stop",
+			Index: converter.GetCurrentContentIndex(),
+		}
 		if err := sseWriter.WriteContentBlockStop(converter.GetCurrentContentIndex()); err != nil {
 			h.logger.Error("failed to write content_block_stop", "error", err)
+		}
+		// Log to debug session
+		if debugSession != nil {
+			debugSession.AppendClaudeChunk("content_block_stop", contentBlockStopEvent)
 		}
 		converter.MarkContentBlockClosed()
 	}
@@ -573,11 +581,22 @@ func (h *MessagesHandler) sendFinalStreamEvents(sseWriter *claude.SSEWriter, con
 		if err := sseWriter.WriteEvent("message_delta", messageDeltaEvent); err != nil {
 			h.logger.Error("failed to write message_delta", "error", err)
 		}
+		// Log to debug session
+		if debugSession != nil {
+			debugSession.AppendClaudeChunk("message_delta", messageDeltaEvent)
+		}
 	}
 
 	// Send message_stop
+	messageStopEvent := claude.MessageStopEvent{
+		Type: "message_stop",
+	}
 	if err := sseWriter.WriteMessageStop(); err != nil {
 		h.logger.Error("failed to write message_stop", "error", err)
+	}
+	// Log to debug session
+	if debugSession != nil {
+		debugSession.AppendClaudeChunk("message_stop", messageStopEvent)
 	}
 }
 
