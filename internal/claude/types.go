@@ -147,6 +147,9 @@ func (req *MessageRequest) GetSystemString() string {
 		var result string
 		for _, block := range blocks {
 			if block.Type == "text" {
+				if result != "" {
+					result += "\n\n" // Add separator between blocks
+				}
 				result += block.Text
 			}
 		}
@@ -170,6 +173,9 @@ func (m *Message) GetContentString() string {
 		var result string
 		for _, block := range blocks {
 			if block.Type == "text" {
+				if result != "" {
+					result += "\n\n" // Add separator between blocks
+				}
 				result += block.Text
 			}
 		}

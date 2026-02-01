@@ -238,8 +238,10 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 		}
 
 		// Build request body - include profileARN for social auth method and tools
-		messagesJSON, _ := json.Marshal(req.Messages)
-		toolsJSON, _ := json.Marshal(req.Tools)
+		// Use MarshalWithoutHTMLEscape to avoid Go's default HTML escaping of <, >, &
+		// which causes "Improperly formed request" errors from Kiro API
+		messagesJSON, _ := kiro.MarshalWithoutHTMLEscape(req.Messages)
+		toolsJSON, _ := kiro.MarshalWithoutHTMLEscape(req.Tools)
 		reqBody, metadata, err := kiro.BuildRequestBody(req.Model, messagesJSON, req.MaxTokens, true, req.GetSystemString(), acc.ProfileARN, toolsJSON)
 		if err != nil {
 			if debugSession != nil {
@@ -315,6 +317,48 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 						"Input context is too long. Please compact or reduce your conversation history to continue. " +
 							"Consider using /compact command or starting a new conversation."))
 					return
+				}
+				// Check for "Improperly formed request" - try to fix by injecting tools from history
+				if apiErr.IsImproperlyFormedRequest() {
+					modifiedBody, modified := kiro.InjectToolsFromHistory(reqBody)
+					if modified {
+						h.logger.Info("Attempting to fix improperly formed request by injecting tools from history",
+							"uuid", acc.UUID,
+							"model", req.Model)
+
+						// Retry with modified request body
+						kiroReq.Body = modifiedBody
+						retryBody, retryErr := h.kiroClient.SendStreamingRequest(ctx, kiroReq)
+						if retryErr == nil {
+							// Success! Continue with the response
+							h.logger.Info("Fixed improperly formed request successfully",
+								"uuid", acc.UUID,
+								"model", req.Model)
+
+							// Increment usage
+							_ = h.poolManager.IncrementUsage(ctx, acc.UUID)
+
+							// Stream the response
+							hasException := h.streamResponse(ctx, retryBody, sseWriter, req.Model, estimatedInputTokens, acc.UUID, startTime, debugSession)
+							if err := retryBody.Close(); err != nil {
+								h.logger.Warn("failed to close response body", "error", err)
+							}
+
+							if debugSession != nil {
+								if hasException {
+									debugSession.SetErrorType("stream_exception")
+									debugSession.Fail(fmt.Errorf("received exception during streaming"))
+								} else {
+									debugSession.Success()
+								}
+							}
+							return
+						}
+						// Retry also failed, continue with normal error handling
+						h.logger.Warn("Retry with injected tools also failed",
+							"uuid", acc.UUID,
+							"error", retryErr)
+					}
 				}
 				if apiErr.IsBadRequest() {
 					// 400 Bad Request - likely model not supported by this account
@@ -598,8 +642,9 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 
 		// Build request body - use stream=true internally to receive chunks
 		// Include profileARN for social auth method and tools
-		messagesJSON, _ := json.Marshal(req.Messages)
-		toolsJSON, _ := json.Marshal(req.Tools)
+		// Use MarshalWithoutHTMLEscape to avoid Go's default HTML escaping of <, >, &
+		messagesJSON, _ := kiro.MarshalWithoutHTMLEscape(req.Messages)
+		toolsJSON, _ := kiro.MarshalWithoutHTMLEscape(req.Tools)
 		reqBody, metadata, err := kiro.BuildRequestBody(req.Model, messagesJSON, req.MaxTokens, true, req.GetSystemString(), acc.ProfileARN, toolsJSON)
 		if err != nil {
 			if debugSession != nil {
@@ -675,6 +720,64 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 						"Input context is too long. Please compact or reduce your conversation history to continue. "+
 							"Consider using /compact command or starting a new conversation."))
 					return
+				}
+				// Check for "Improperly formed request" - try to fix by injecting tools from history
+				if apiErr.IsImproperlyFormedRequest() {
+					modifiedBody, modified := kiro.InjectToolsFromHistory(reqBody)
+					if modified {
+						h.logger.Info("Attempting to fix improperly formed request by injecting tools from history",
+							"uuid", acc.UUID,
+							"model", req.Model)
+
+						// Retry with modified request body
+						kiroReq.Body = modifiedBody
+						retryBody, retryErr := h.kiroClient.SendStreamingRequest(ctx, kiroReq)
+						if retryErr == nil {
+							// Success! Continue with the response
+							h.logger.Info("Fixed improperly formed request successfully",
+								"uuid", acc.UUID,
+								"model", req.Model)
+
+							// Increment usage
+							_ = h.poolManager.IncrementUsage(ctx, acc.UUID)
+
+							// Aggregate the response
+							response, hasException := h.aggregateResponse(ctx, retryBody, req.Model, estimatedInputTokens, acc.UUID, startTime, debugSession)
+							if err := retryBody.Close(); err != nil {
+								h.logger.Warn("failed to close response body", "error", err)
+							}
+
+							if response == nil {
+								if debugSession != nil {
+									debugSession.SetError(fmt.Errorf("failed to aggregate response"))
+									debugSession.Fail(fmt.Errorf("failed to aggregate response"))
+								}
+								h.writeError(w, claude.NewAPIError("Failed to aggregate response"))
+								return
+							}
+
+							if debugSession != nil {
+								if hasException {
+									debugSession.SetErrorType("stream_exception")
+									debugSession.Fail(fmt.Errorf("received exception during streaming"))
+								} else {
+									debugSession.Success()
+								}
+							}
+
+							// Write JSON response
+							w.Header().Set("Content-Type", "application/json")
+							w.WriteHeader(http.StatusOK)
+							if err := json.NewEncoder(w).Encode(response); err != nil {
+								h.logger.Error("failed to write response", "error", err)
+							}
+							return
+						}
+						// Retry also failed, continue with normal error handling
+						h.logger.Warn("Retry with injected tools also failed",
+							"uuid", acc.UUID,
+							"error", retryErr)
+					}
 				}
 				if apiErr.IsBadRequest() {
 					// 400 Bad Request - likely model not supported by this account
