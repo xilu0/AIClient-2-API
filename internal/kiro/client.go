@@ -578,7 +578,7 @@ func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool,
 		"kiro_model":     kiroModel,
 	}
 
-	body, err := json.Marshal(request)
+	body, err := MarshalWithoutHTMLEscape(request)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
@@ -911,8 +911,8 @@ func InjectToolsFromHistory(reqBody []byte) ([]byte, bool) {
 	}
 	ctx["tools"] = kiroTools
 
-	// Marshal back to JSON
-	modifiedBody, err := json.Marshal(request)
+	// Marshal back to JSON without HTML escaping (Kiro API rejects \u003c etc.)
+	modifiedBody, err := MarshalWithoutHTMLEscape(request)
 	if err != nil {
 		return reqBody, false
 	}
@@ -1052,7 +1052,7 @@ func sanitizeToolSchema(schemaJSON json.RawMessage) json.RawMessage {
 		return schemaJSON // No changes needed
 	}
 
-	result, err := json.Marshal(schema)
+	result, err := MarshalWithoutHTMLEscape(schema)
 	if err != nil {
 		return schemaJSON
 	}
