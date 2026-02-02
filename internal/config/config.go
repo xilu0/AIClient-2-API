@@ -6,6 +6,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/anthropics/AIClient-2-API/internal/claude"
 )
 
 // Config holds all configuration for the Kiro server.
@@ -46,6 +48,9 @@ type Config struct {
 
 	// Cache settings
 	AccountCacheTTL time.Duration
+
+	// Request size limits
+	MaxKiroRequestBody int
 }
 
 // Load reads configuration from environment variables and command-line flags.
@@ -72,6 +77,7 @@ func Load() *Config {
 		MaxRetries:          3,
 		RefreshThreshold:    5 * time.Minute,
 		AccountCacheTTL:     5 * time.Second,
+		MaxKiroRequestBody:  claude.MaxKiroRequestBodyDefault,
 	}
 
 	// Load from environment
@@ -125,6 +131,11 @@ func (c *Config) loadFromEnv() {
 	if v := os.Getenv("GO_KIRO_GRACEFUL_TIMEOUT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			c.GracefulTimeout = d
+		}
+	}
+	if v := os.Getenv("GO_KIRO_MAX_REQUEST_BODY"); v != "" {
+		if size, err := strconv.Atoi(v); err == nil {
+			c.MaxKiroRequestBody = size
 		}
 	}
 }

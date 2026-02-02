@@ -142,5 +142,14 @@ func NewAPIErrorWithStatus(message string, statusCode int) *APIError {
 	}
 }
 
+// NewRequestTooLargeError creates a new request too large error (413).
+func NewRequestTooLargeError(message string) *APIError {
+	return &APIError{
+		Type:       ErrorTypeInvalidRequest,
+		Message:    message,
+		StatusCode: http.StatusRequestEntityTooLarge,
+	}
+}
+
 // ErrNoHealthyAccounts is returned when no healthy accounts are available.
 var ErrNoHealthyAccounts = NewOverloadedError("No healthy accounts available")

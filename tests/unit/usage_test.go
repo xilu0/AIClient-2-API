@@ -2,6 +2,8 @@
 package unit
 
 import (
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/anthropics/AIClient-2-API/internal/claude"
@@ -46,11 +48,11 @@ func TestDistributeTokens_Ratios(t *testing.T) {
 	// Test 1:2:25 ratio with various inputs
 	// For larger token counts, ratios should be more accurate
 	tests := []struct {
-		name         string
-		input        int
-		checkRatios  bool  // Only check ratios for larger values
+		name        string
+		input       int
+		checkRatios bool // Only check ratios for larger values
 	}{
-		{"100 tokens", 100, false},  // Too small for ratio check
+		{"100 tokens", 100, false}, // Too small for ratio check
 		{"280 tokens (exact multiple)", 280, true},
 		{"500 tokens", 500, true},
 		{"1000 tokens", 1000, true},
@@ -119,10 +121,10 @@ func TestCalculateInputTokensFromPercentage(t *testing.T) {
 		expected     int
 	}{
 		{"zero percentage", 0, 100, 0},
-		{"1% with 100 output", 1.0, 100, 1625},     // 172500 * 0.01 - 100 = 1625
-		{"5% with 500 output", 5.0, 500, 8125},     // 172500 * 0.05 - 500 = 8125
-		{"output exceeds total", 1.0, 5000, 0},     // 172500 * 0.01 - 5000 = -3275 -> 0
-		{"10% with 0 output", 10.0, 0, 17250},      // 172500 * 0.10 = 17250
+		{"1% with 100 output", 1.0, 100, 1625}, // 172500 * 0.01 - 100 = 1625
+		{"5% with 500 output", 5.0, 500, 8125}, // 172500 * 0.05 - 500 = 8125
+		{"output exceeds total", 1.0, 5000, 0}, // 172500 * 0.01 - 5000 = -3275 -> 0
+		{"10% with 0 output", 10.0, 0, 17250},  // 172500 * 0.10 = 17250
 	}
 
 	for _, tt := range tests {
@@ -135,8 +137,8 @@ func TestCalculateInputTokensFromPercentage(t *testing.T) {
 
 func TestEstimateInputTokens(t *testing.T) {
 	tests := []struct {
-		name     string
-		req      *claude.MessageRequest
+		name      string
+		req       *claude.MessageRequest
 		minTokens int
 		maxTokens int
 	}{
@@ -199,7 +201,7 @@ func TestCountTextTokens(t *testing.T) {
 	}{
 		{"empty string", "", 0},
 		{"short text", "Hi", 1},
-		{"medium text", "Hello, world!", 4},  // 13 chars / 3 = 4 (conservative)
+		{"medium text", "Hello, world!", 4}, // 13 chars / 3 = 4 (conservative)
 		{"longer text", "This is a longer text that should have more tokens", 16}, // 50 chars / 3 = 16
 	}
 
@@ -209,4 +211,68 @@ func TestCountTextTokens(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+func TestLimitsConstants(t *testing.T) {
+	assert.Equal(t, 200000, claude.ContextWindowTokens)
+	assert.Equal(t, 64000, claude.MaxOutputTokens)
+	assert.Equal(t, 32<<20, claude.MaxKiroRequestBodyDefault)
+}
+
+func TestNewRequestTooLargeError(t *testing.T) {
+	err := claude.NewRequestTooLargeError("payload too big")
+
+	assert.Equal(t, claude.ErrorTypeInvalidRequest, err.Type)
+	assert.Equal(t, "payload too big", err.Message)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, err.StatusCode)
+	assert.Equal(t, 413, err.StatusCode)
+}
+
+func TestTokenEstimation_ExceedsContextWindow(t *testing.T) {
+	// Simulate a request whose estimated tokens exceed available context.
+	// 600,000 chars / 3 = ~200,000 tokens → should exceed context window minus max_tokens.
+	largeText := `"` + strings.Repeat("x", 600000) + `"`
+	req := &claude.MessageRequest{
+		MaxTokens: 8192,
+		Messages: []claude.Message{
+			{Role: "user", Content: []byte(largeText)},
+		},
+	}
+
+	estimated := claude.EstimateInputTokens(req)
+	available := claude.ContextWindowTokens - req.MaxTokens
+
+	assert.Greater(t, estimated, available, "large request should exceed available tokens")
+}
+
+func TestTokenEstimation_FitsContextWindow(t *testing.T) {
+	// A small request should fit comfortably within the context window.
+	req := &claude.MessageRequest{
+		MaxTokens: 8192,
+		Messages: []claude.Message{
+			{Role: "user", Content: []byte(`"Hello, how are you?"`)},
+		},
+	}
+
+	estimated := claude.EstimateInputTokens(req)
+	available := claude.ContextWindowTokens - req.MaxTokens
+
+	assert.LessOrEqual(t, estimated, available, "small request should fit within available tokens")
+}
+
+func TestTokenEstimation_MaxOutputTokensBoundary(t *testing.T) {
+	// With MaxTokens = MaxOutputTokens (64000), available = 200000 - 64000 = 136000.
+	// A request with ~135000 estimated tokens should still fit.
+	req := &claude.MessageRequest{
+		MaxTokens: claude.MaxOutputTokens,
+		Messages: []claude.Message{
+			// 400,000 chars / 3 ≈ 133,333 tokens + overhead < 136,000
+			{Role: "user", Content: []byte(`"` + strings.Repeat("a", 400000) + `"`)},
+		},
+	}
+
+	estimated := claude.EstimateInputTokens(req)
+	available := claude.ContextWindowTokens - req.MaxTokens
+
+	assert.LessOrEqual(t, estimated, available, "request at max_tokens boundary should fit")
 }

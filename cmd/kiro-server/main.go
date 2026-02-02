@@ -87,12 +87,13 @@ func main() {
 
 	// Create handlers
 	messagesHandler := handler.NewMessagesHandler(handler.MessagesHandlerOptions{
-		Selector:     selector,
-		PoolManager:  poolManager,
-		TokenManager: tokenManager,
-		KiroClient:   kiroClient,
-		Logger:       logger,
-		MaxRetries:   cfg.MaxRetries,
+		Selector:        selector,
+		PoolManager:     poolManager,
+		TokenManager:    tokenManager,
+		KiroClient:      kiroClient,
+		Logger:          logger,
+		MaxRetries:      cfg.MaxRetries,
+		MaxKiroBodySize: cfg.MaxKiroRequestBody,
 	})
 
 	countTokensHandler := handler.NewCountTokensHandler(handler.CountTokensHandlerOptions{

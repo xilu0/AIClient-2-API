@@ -33,23 +33,25 @@ func (r StreamResult) IsGhostException() bool {
 
 // MessagesHandler handles POST /v1/messages requests.
 type MessagesHandler struct {
-	selector     *account.Selector
-	poolManager  *redis.PoolManager
-	tokenManager *redis.TokenManager
-	kiroClient   *kiro.Client
-	logger       *slog.Logger
-	maxRetries   int
-	debugDumper  *debug.Dumper
+	selector        *account.Selector
+	poolManager     *redis.PoolManager
+	tokenManager    *redis.TokenManager
+	kiroClient      *kiro.Client
+	logger          *slog.Logger
+	maxRetries      int
+	maxKiroBodySize int
+	debugDumper     *debug.Dumper
 }
 
 // MessagesHandlerOptions configures the messages handler.
 type MessagesHandlerOptions struct {
-	Selector     *account.Selector
-	PoolManager  *redis.PoolManager
-	TokenManager *redis.TokenManager
-	KiroClient   *kiro.Client
-	Logger       *slog.Logger
-	MaxRetries   int
+	Selector        *account.Selector
+	PoolManager     *redis.PoolManager
+	TokenManager    *redis.TokenManager
+	KiroClient      *kiro.Client
+	Logger          *slog.Logger
+	MaxRetries      int
+	MaxKiroBodySize int
 }
 
 // NewMessagesHandler creates a new messages handler.
@@ -70,13 +72,14 @@ func NewMessagesHandler(opts MessagesHandlerOptions) *MessagesHandler {
 	}
 
 	return &MessagesHandler{
-		selector:     opts.Selector,
-		poolManager:  opts.PoolManager,
-		tokenManager: opts.TokenManager,
-		kiroClient:   opts.KiroClient,
-		logger:       logger,
-		maxRetries:   maxRetries,
-		debugDumper:  debugDumper,
+		selector:        opts.Selector,
+		poolManager:     opts.PoolManager,
+		tokenManager:    opts.TokenManager,
+		kiroClient:      opts.KiroClient,
+		logger:          logger,
+		maxRetries:      maxRetries,
+		maxKiroBodySize: opts.MaxKiroBodySize,
+		debugDumper:     debugDumper,
 	}
 }
 
@@ -120,6 +123,19 @@ func (h *MessagesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Layer 1: Token-level payload size check
+	estimatedInput := claude.EstimateInputTokens(&req)
+	if estimatedInput > claude.ContextWindowTokens {
+		h.logger.Warn("request exceeds token limit",
+			"estimated_input", estimatedInput,
+			"limit", claude.ContextWindowTokens,
+			"session_id", sessionID)
+		h.writeError(w, claude.NewRequestTooLargeError(
+			fmt.Sprintf("Estimated input ~%d tokens exceeds context window %d. Reduce conversation history.",
+				estimatedInput, claude.ContextWindowTokens)))
+		return
+	}
+
 	// Handle streaming vs non-streaming
 	if req.Stream {
 		h.handleStreaming(ctx, w, &req, debugSession)
@@ -142,8 +158,8 @@ func (h *MessagesHandler) validateRequest(req *claude.MessageRequest) *claude.AP
 	}
 
 	// Validate max_tokens range
-	if req.MaxTokens > 200000 {
-		return claude.NewInvalidRequestError("max_tokens: exceeds maximum allowed value of 200000")
+	if req.MaxTokens > claude.MaxOutputTokens {
+		return claude.NewInvalidRequestError(fmt.Sprintf("max_tokens: exceeds maximum allowed value of %d", claude.MaxOutputTokens))
 	}
 
 	// Validate messages
@@ -264,6 +280,15 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 			return
 		}
 
+		// Layer 2: Kiro body size check
+		if h.maxKiroBodySize > 0 && len(reqBody) > h.maxKiroBodySize {
+			h.logger.Warn("kiro request body too large", "size", len(reqBody), "limit", h.maxKiroBodySize)
+			_ = sseWriter.WriteError(claude.NewRequestTooLargeError(
+				fmt.Sprintf("Request body %d bytes exceeds Kiro limit %d bytes. Reduce conversation history.",
+					len(reqBody), h.maxKiroBodySize)))
+			return
+		}
+
 		// Dump Kiro request for debugging
 		if debugSession != nil {
 			debugSession.DumpKiroRequest(reqBody)
@@ -317,7 +342,7 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 				// Check for context too long error BEFORE generic IsBadRequest
 				// Return 503 to trigger client-side compaction
 				if apiErr.IsContextTooLong() {
-					h.logger.Warn("Context too long, returning 503 to trigger compaction",
+					h.logger.Warn("Context too long, returning 413",
 						"uuid", acc.UUID,
 						"profile_arn", acc.ProfileARN,
 						"model", req.Model)
@@ -325,9 +350,8 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 						debugSession.SetError(err)
 						debugSession.Fail(err)
 					}
-					_ = sseWriter.WriteError(claude.NewOverloadedError(
-						"Input context is too long. Please compact or reduce your conversation history to continue. " +
-							"Consider using /compact command or starting a new conversation."))
+					_ = sseWriter.WriteError(claude.NewRequestTooLargeError(
+						"Input is too long. Reduce conversation history or use /compact command."))
 					return
 				}
 				// Check for "Improperly formed request" - try to fix by injecting tools from history
@@ -697,6 +721,15 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 			return
 		}
 
+		// Layer 2: Kiro body size check
+		if h.maxKiroBodySize > 0 && len(reqBody) > h.maxKiroBodySize {
+			h.logger.Warn("kiro request body too large", "size", len(reqBody), "limit", h.maxKiroBodySize)
+			h.writeError(w, claude.NewRequestTooLargeError(
+				fmt.Sprintf("Request body %d bytes exceeds Kiro limit %d bytes. Reduce conversation history.",
+					len(reqBody), h.maxKiroBodySize)))
+			return
+		}
+
 		// Dump Kiro request for debugging
 		if debugSession != nil {
 			debugSession.DumpKiroRequest(reqBody)
@@ -750,7 +783,7 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 				// Check for context too long error BEFORE generic IsBadRequest
 				// Return 503 to trigger client-side compaction
 				if apiErr.IsContextTooLong() {
-					h.logger.Warn("Context too long, returning 503 to trigger compaction",
+					h.logger.Warn("Context too long, returning 413",
 						"uuid", acc.UUID,
 						"profile_arn", acc.ProfileARN,
 						"model", req.Model)
@@ -758,9 +791,8 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 						debugSession.SetError(err)
 						debugSession.Fail(err)
 					}
-					h.writeError(w, claude.NewOverloadedError(
-						"Input context is too long. Please compact or reduce your conversation history to continue. "+
-							"Consider using /compact command or starting a new conversation."))
+					h.writeError(w, claude.NewRequestTooLargeError(
+						"Input is too long. Reduce conversation history or use /compact command."))
 					return
 				}
 				// Check for "Improperly formed request" - try to fix by injecting tools from history
