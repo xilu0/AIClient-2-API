@@ -328,3 +328,8 @@ func (a *Aggregator) Build() *MessageResponse {
 func (a *Aggregator) GetMessageID() string {
 	return a.messageID
 }
+
+// ContentDelivered returns true if any content was aggregated.
+func (a *Aggregator) ContentDelivered() bool {
+	return a.outputText != "" || len(a.content) > 0 || a.currentBlockIndex >= 0
+}

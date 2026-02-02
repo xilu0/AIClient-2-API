@@ -749,6 +749,38 @@ func TestConverterStateTrackingMethods(t *testing.T) {
 	})
 }
 
+// TestConverterContentDelivered tests the ContentDelivered method.
+func TestConverterContentDelivered(t *testing.T) {
+	t.Run("empty_converter_returns_false", func(t *testing.T) {
+		converter := claude.NewConverter("claude-sonnet-4")
+		assert.False(t, converter.ContentDelivered())
+	})
+
+	t.Run("after_text_content_returns_true", func(t *testing.T) {
+		converter := claude.NewConverter("claude-sonnet-4")
+		_, _ = converter.Convert(&kiro.KiroChunk{Content: "Hello"})
+		assert.True(t, converter.ContentDelivered())
+	})
+
+	t.Run("after_tool_use_returns_true", func(t *testing.T) {
+		converter := claude.NewConverter("claude-sonnet-4")
+		_, _ = converter.Convert(&kiro.KiroChunk{
+			Name:      "test_tool",
+			ToolUseID: "tool_123",
+		})
+		assert.True(t, converter.ContentDelivered())
+	})
+
+	t.Run("after_legacy_message_start_returns_true", func(t *testing.T) {
+		converter := claude.NewConverter("claude-sonnet-4")
+		_, _ = converter.Convert(&kiro.KiroChunk{
+			Type:    "message_start",
+			Message: &kiro.KiroMessage{Role: "assistant"},
+		})
+		assert.True(t, converter.ContentDelivered())
+	})
+}
+
 func intPtr(i int) *int {
 	return &i
 }

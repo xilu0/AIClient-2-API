@@ -179,6 +179,43 @@ func TestAggregator_EmptyResponse(t *testing.T) {
 	assert.Empty(t, response.Content)
 }
 
+// TestAggregator_ContentDelivered tests the ContentDelivered method.
+func TestAggregator_ContentDelivered(t *testing.T) {
+	t.Run("empty_aggregator_returns_false", func(t *testing.T) {
+		agg := claude.NewAggregator("claude-sonnet-4")
+		assert.False(t, agg.ContentDelivered())
+	})
+
+	t.Run("after_text_content_returns_true", func(t *testing.T) {
+		agg := claude.NewAggregator("claude-sonnet-4")
+		_ = agg.Add(&kiro.KiroChunk{Content: "Hello"})
+		assert.True(t, agg.ContentDelivered())
+	})
+
+	t.Run("after_tool_use_returns_true", func(t *testing.T) {
+		agg := claude.NewAggregator("claude-sonnet-4")
+		_ = agg.Add(&kiro.KiroChunk{
+			Name:      "test_tool",
+			ToolUseID: "tool_123",
+			Input:     `{"key": "value"}`,
+			Stop:      true,
+		})
+		assert.True(t, agg.ContentDelivered())
+	})
+
+	t.Run("after_legacy_content_block_returns_true", func(t *testing.T) {
+		agg := claude.NewAggregator("claude-sonnet-4")
+		_ = agg.Add(&kiro.KiroChunk{
+			Type:  "content_block_start",
+			Index: intPtr(0),
+			ContentBlock: &kiro.KiroContentBlock{
+				Type: "text",
+			},
+		})
+		assert.True(t, agg.ContentDelivered())
+	})
+}
+
 func TestAggregator_MessageID(t *testing.T) {
 	agg := claude.NewAggregator("claude-sonnet-4")
 

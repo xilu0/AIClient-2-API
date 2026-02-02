@@ -564,6 +564,12 @@ func (c *Converter) MarkContentBlockClosed() {
 	c.inToolUse = false
 }
 
+// ContentDelivered returns true if content was delivered to the client.
+// Covers plain text streams (contentStarted) and tool_use streams (messageStartSent).
+func (c *Converter) ContentDelivered() bool {
+	return c.contentStarted || c.messageStartSent
+}
+
 // strPtr returns a pointer to the given string.
 // Used for JSON serialization where we need to distinguish nil vs empty string.
 func strPtr(s string) *string {
