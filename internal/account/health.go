@@ -17,7 +17,7 @@ type HealthTracker struct {
 // NewHealthTracker creates a new health tracker.
 func NewHealthTracker(poolManager *redis.PoolManager, cooldownPeriod time.Duration) *HealthTracker {
 	if cooldownPeriod == 0 {
-		cooldownPeriod = 60 * time.Second
+		cooldownPeriod = 6 * time.Second
 	}
 	return &HealthTracker{
 		poolManager:    poolManager,

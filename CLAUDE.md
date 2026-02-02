@@ -272,7 +272,7 @@ The Go service implements a high-concurrency version of the Kiro provider's `/v1
 
 - **Lock-Free Selection**: Uses atomic Redis `INCR` for round-robin account selection (no distributed locks)
 - **Connection Pooling**: HTTP keep-alive with configurable pool size for upstream Kiro API
-- **Health-Aware Routing**: Automatic failover with 60-second passive recovery cooldown
+- **Health-Aware Routing**: Automatic failover with 6-second passive recovery cooldown
 - **Token Distribution**: Implements 1:2:25 cache token distribution ratio (same as Node.js)
 - **SSE Streaming**: Direct streaming without response buffering
 - **Graceful Shutdown**: Completes in-flight requests before termination
@@ -293,7 +293,7 @@ The Go service implements a high-concurrency version of the Kiro provider's `/v1
 | `GO_KIRO_KIRO_API_TIMEOUT` | `300s` | Kiro API request timeout |
 | `GO_KIRO_LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
 | `GO_KIRO_LOG_JSON` | `true` | Enable JSON logging |
-| `GO_KIRO_HEALTH_COOLDOWN` | `60s` | Health recovery cooldown |
+| `GO_KIRO_HEALTH_COOLDOWN` | `6s` | Health recovery cooldown |
 | `GO_KIRO_ACCOUNT_CACHE_TTL` | `5s` | Account list cache TTL |
 | `GO_KIRO_MAX_RETRIES` | `3` | Max retry attempts on 429/403 |
 | `GO_KIRO_GRACEFUL_TIMEOUT` | `30s` | Graceful shutdown timeout |
@@ -317,7 +317,7 @@ read := tokens - input - creation  // remainder
 
 **Health Recovery**: Passive recovery with cooldown:
 1. Account receives 429/403 → marked unhealthy
-2. After 60 seconds → eligible for retry
+2. After 6 seconds → eligible for retry
 3. Successful request → marked healthy again
 
 ### When to Use Go vs Node.js

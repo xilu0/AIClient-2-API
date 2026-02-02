@@ -25,7 +25,7 @@ func TestConfigDefaults(t *testing.T) {
 	assert.Equal(t, 100, cfg.MaxConns)
 	assert.Equal(t, "info", cfg.LogLevel)
 	assert.Equal(t, true, cfg.LogJSON)
-	assert.Equal(t, 60*time.Second, cfg.HealthCooldown)
+	assert.Equal(t, 6*time.Second, cfg.HealthCooldown)
 	assert.Equal(t, 3, cfg.MaxRetries)
 	assert.Equal(t, 5*time.Minute, cfg.RefreshThreshold)
 	assert.Equal(t, 5*time.Second, cfg.AccountCacheTTL)

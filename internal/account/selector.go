@@ -55,7 +55,7 @@ func NewSelector(opts SelectorOptions) *Selector {
 
 	healthCooldown := opts.HealthCooldown
 	if healthCooldown == 0 {
-		healthCooldown = 60 * time.Second
+		healthCooldown = 6 * time.Second
 	}
 
 	return &Selector{
@@ -166,8 +166,11 @@ func (s *Selector) getHealthyAccounts(ctx context.Context) ([]redis.Account, err
 }
 
 // filterHealthyAccounts returns accounts that are healthy or eligible for retry.
+// If no accounts pass the health filter, all non-disabled accounts are returned
+// (all unhealthy == all healthy) to maximize availability.
 func (s *Selector) filterHealthyAccounts(accounts []redis.Account) []redis.Account {
 	var healthy []redis.Account
+	var nonDisabled []redis.Account
 	now := time.Now()
 
 	for _, acc := range accounts {
@@ -175,6 +178,8 @@ func (s *Selector) filterHealthyAccounts(accounts []redis.Account) []redis.Accou
 		if acc.IsDisabled {
 			continue
 		}
+
+		nonDisabled = append(nonDisabled, acc)
 
 		if acc.IsHealthy {
 			healthy = append(healthy, acc)
@@ -201,6 +206,16 @@ func (s *Selector) filterHealthyAccounts(accounts []redis.Account) []redis.Accou
 				healthy = append(healthy, acc)
 			}
 		}
+	}
+
+	// If no healthy accounts found, use all non-disabled accounts
+	// All unhealthy == all healthy: maximize availability
+	if len(healthy) == 0 && len(nonDisabled) > 0 {
+		s.logger.Warn("no healthy accounts after filtering, using all non-disabled accounts as fallback",
+			"total", len(accounts),
+			"non_disabled", len(nonDisabled),
+		)
+		return nonDisabled
 	}
 
 	return healthy

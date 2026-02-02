@@ -108,21 +108,21 @@ func TestGetCooldownRemaining_CooldownElapsed(t *testing.T) {
 }
 
 func TestDefaultCooldownPeriod(t *testing.T) {
-	// When cooldown is 0, should use 60 seconds default
+	// When cooldown is 0, should use 6 seconds default
 	tracker := account.NewHealthTracker(nil, 0)
 
 	acc := &redis.Account{
 		UUID:          "test-uuid",
 		IsHealthy:     false,
-		LastErrorTime: time.Now().Add(-30 * time.Second).Format(time.RFC3339),
+		LastErrorTime: time.Now().Add(-3 * time.Second).Format(time.RFC3339),
 	}
 
-	// 30 seconds elapsed out of 60, so should not be eligible
+	// 3 seconds elapsed out of 6, so should not be eligible
 	assert.False(t, tracker.IsEligibleForRetry(acc))
 
-	// 30 seconds remaining
+	// 3 seconds remaining
 	remaining := tracker.GetCooldownRemaining(acc)
-	assert.InDelta(t, 30*time.Second, remaining, float64(2*time.Second))
+	assert.InDelta(t, 3*time.Second, remaining, float64(2*time.Second))
 }
 
 func TestIsEligibleForRetry_InvalidTimeFormat(t *testing.T) {

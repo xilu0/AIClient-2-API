@@ -394,24 +394,43 @@ func (h *MessagesHandler) handleStreaming(ctx context.Context, w http.ResponseWr
 							}
 							return
 						}
-						// Retry also failed, continue with normal error handling
+						// Retry also failed - this is a client request problem, not an account problem
+						// Return error directly without marking account unhealthy
 						h.logger.Warn("Retry with injected tools also failed",
 							"uuid", acc.UUID,
 							"error", retryErr)
 					}
+					// Improperly formed request is a client-side issue, return error without marking unhealthy
+					h.logger.Warn("Improperly formed request, returning error to client",
+						"uuid", acc.UUID,
+						"profile_arn", acc.ProfileARN,
+						"model", req.Model)
+					if debugSession != nil {
+						debugSession.SetError(err)
+						debugSession.Fail(err)
+					}
+					_ = sseWriter.WriteError(claude.NewInvalidRequestError(
+						"Improperly formed request. Check message format and tool definitions."))
+					return
 				}
 				if apiErr.IsBadRequest() {
-					// 400 Bad Request - likely model not supported by this account
-					// Mark account unhealthy and retry with another account
-					_ = h.poolManager.MarkUnhealthy(ctx, acc.UUID)
-					excluded[acc.UUID] = true
+					// 400 Bad Request - client-side issue, do NOT mark account unhealthy
+					// This maximizes availability: 400 errors are request problems, not account problems
 					lastErr = err
-					h.logger.Warn("Account returned 400, may not support this model",
+					h.logger.Warn("Bad request from Kiro API, returning error to client",
 						"uuid", acc.UUID,
 						"profile_arn", acc.ProfileARN,
 						"model", req.Model,
 						"region", acc.Region)
-					continue
+					if debugSession != nil {
+						debugSession.SetError(err)
+						debugSession.Fail(err)
+					}
+					_ = sseWriter.WriteError(claude.NewAPIErrorWithStatus(
+						fmt.Sprintf("Bad request: %s", string(apiErr.Body)),
+						apiErr.StatusCode,
+					))
+					return
 				}
 			}
 			h.logger.Error("Kiro API error", "error", err, "uuid", acc.UUID, "profile_arn", acc.ProfileARN)
@@ -851,24 +870,43 @@ func (h *MessagesHandler) handleNonStreaming(ctx context.Context, w http.Respons
 							}
 							return
 						}
-						// Retry also failed, continue with normal error handling
+						// Retry also failed - this is a client request problem, not an account problem
+						// Return error directly without marking account unhealthy
 						h.logger.Warn("Retry with injected tools also failed",
 							"uuid", acc.UUID,
 							"error", retryErr)
 					}
+					// Improperly formed request is a client-side issue, return error without marking unhealthy
+					h.logger.Warn("Improperly formed request, returning error to client",
+						"uuid", acc.UUID,
+						"profile_arn", acc.ProfileARN,
+						"model", req.Model)
+					if debugSession != nil {
+						debugSession.SetError(err)
+						debugSession.Fail(err)
+					}
+					h.writeError(w, claude.NewInvalidRequestError(
+						"Improperly formed request. Check message format and tool definitions."))
+					return
 				}
 				if apiErr.IsBadRequest() {
-					// 400 Bad Request - likely model not supported by this account
-					// Mark account unhealthy and retry with another account
-					_ = h.poolManager.MarkUnhealthy(ctx, acc.UUID)
-					excluded[acc.UUID] = true
+					// 400 Bad Request - client-side issue, do NOT mark account unhealthy
+					// This maximizes availability: 400 errors are request problems, not account problems
 					lastErr = err
-					h.logger.Warn("Account returned 400, may not support this model",
+					h.logger.Warn("Bad request from Kiro API, returning error to client",
 						"uuid", acc.UUID,
 						"profile_arn", acc.ProfileARN,
 						"model", req.Model,
 						"region", acc.Region)
-					continue
+					if debugSession != nil {
+						debugSession.SetError(err)
+						debugSession.Fail(err)
+					}
+					h.writeError(w, claude.NewAPIErrorWithStatus(
+						fmt.Sprintf("Bad request: %s", string(apiErr.Body)),
+						apiErr.StatusCode,
+					))
+					return
 				}
 			}
 			h.logger.Error("Kiro API error", "error", err, "uuid", acc.UUID, "profile_arn", acc.ProfileARN)

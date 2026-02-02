@@ -73,7 +73,7 @@ func Load() *Config {
 		KiroAPITimeout:      5 * time.Minute,
 		LogLevel:            "info",
 		LogJSON:             true,
-		HealthCooldown:      60 * time.Second,
+		HealthCooldown:      6 * time.Second,
 		MaxRetries:          3,
 		RefreshThreshold:    5 * time.Minute,
 		AccountCacheTTL:     5 * time.Second,
