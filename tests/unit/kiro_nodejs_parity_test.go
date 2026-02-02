@@ -10,7 +10,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestKiroRequestParity_NodeJS tests that Go generates the same kiro_request.json structure as Node.js
+// TestKiroRequestParity_NodeJS tests that Go generates a compatible kiro_request.json structure.
+// Note: For single-message + system prompt cases, Go intentionally diverges from Node.js by
+// merging system into currentMessage instead of duplicating user content across history and
+// currentMessage. This prevents "Input is too long" errors from payload duplication.
 func TestKiroRequestParity_NodeJS(t *testing.T) {
 	// Load Node.js input (original Claude API request)
 	inputData, err := os.ReadFile("../testdata/nodejs_input.json")
@@ -77,26 +80,28 @@ func TestKiroRequestParity_NodeJS(t *testing.T) {
 	})
 
 	t.Run("ConversationStateKeys", func(t *testing.T) {
-		expectedCS := expected["conversationState"].(map[string]interface{})
 		goCS := goResult["conversationState"].(map[string]interface{})
-
-		expectedKeys := getKeys(expectedCS)
 		goKeys := getKeys(goCS)
-		assert.ElementsMatch(t, expectedKeys, goKeys, "conversationState keys should match")
+
+		// Go always has conversationId, currentMessage, chatTriggerType.
+		// For single-message + system cases, Go omits history (no duplication).
+		assert.Contains(t, goKeys, "conversationId")
+		assert.Contains(t, goKeys, "currentMessage")
+		assert.Contains(t, goKeys, "chatTriggerType")
 	})
 
 	t.Run("HistoryCount", func(t *testing.T) {
-		expectedCS := expected["conversationState"].(map[string]interface{})
 		goCS := goResult["conversationState"].(map[string]interface{})
 
-		var expectedHistoryCount, goHistoryCount int
-		if h, ok := expectedCS["history"].([]interface{}); ok {
-			expectedHistoryCount = len(h)
-		}
+		var goHistoryCount int
 		if h, ok := goCS["history"].([]interface{}); ok {
 			goHistoryCount = len(h)
 		}
-		assert.Equal(t, expectedHistoryCount, goHistoryCount, "History count should match")
+
+		// For single-message + system prompt, Go intentionally produces no history
+		// to avoid duplicating user content (fixes "Input is too long" errors).
+		// Node.js puts system+user in history AND user in currentMessage (2x payload).
+		assert.Equal(t, 0, goHistoryCount, "Single-message case should have no history (avoids duplication)")
 	})
 
 	t.Run("HistoryStructure", func(t *testing.T) {
@@ -153,19 +158,31 @@ func TestKiroRequestParity_NodeJS(t *testing.T) {
 		expectedCS := expected["conversationState"].(map[string]interface{})
 		goCS := goResult["conversationState"].(map[string]interface{})
 
-		expectedCM := expectedCS["currentMessage"].(map[string]interface{})
 		goCM := goCS["currentMessage"].(map[string]interface{})
-
-		expectedUIM := expectedCM["userInputMessage"].(map[string]interface{})
 		goUIM := goCM["userInputMessage"].(map[string]interface{})
-
-		expectedContent := expectedUIM["content"].(string)
 		goContent := goUIM["content"].(string)
 
-		// Check content starts with same prefix (first 100 chars)
-		expectedPrefix := truncate(expectedContent, 100)
-		goPrefix := truncate(goContent, 100)
-		assert.Equal(t, expectedPrefix, goPrefix, "currentMessage content prefix should match")
+		// For single-message + system: Go merges system into currentMessage.
+		// Node.js puts user content in currentMessage and system+user in history[0].
+		// Go puts system+user in currentMessage only (no duplication).
+		// Verify Go's currentMessage matches the full system+user content from Node.js history[0].
+		expectedHistoryArr, hasHistory := expectedCS["history"].([]interface{})
+		if hasHistory && len(expectedHistoryArr) > 0 {
+			histItem := expectedHistoryArr[0].(map[string]interface{})
+			if uim, ok := histItem["userInputMessage"].(map[string]interface{}); ok {
+				histContent := uim["content"].(string)
+				// Go's currentMessage should start with the same content as Node.js history[0]
+				assert.Equal(t, truncate(histContent, 100), truncate(goContent, 100),
+					"Go currentMessage should contain system+user content that Node.js puts in history[0]")
+			}
+		} else {
+			// No history in Node.js output — compare currentMessage directly
+			expectedCM := expectedCS["currentMessage"].(map[string]interface{})
+			expectedUIM := expectedCM["userInputMessage"].(map[string]interface{})
+			expectedContent := expectedUIM["content"].(string)
+			assert.Equal(t, truncate(expectedContent, 100), truncate(goContent, 100),
+				"currentMessage content prefix should match")
+		}
 	})
 
 	t.Run("HistoryFirstItemContent", func(t *testing.T) {

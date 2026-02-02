@@ -143,9 +143,9 @@ tr2 := toolResults[1].(map[string]interface{})
 }
 
 func TestBuildRequestBody_MergeWithSystemPrompt(t *testing.T) {
-	// Test system prompt prepending with merging
-	// New behavior (matching Node.js): system+firstUser goes to history[0],
-	// currentMessage contains the merged user content without system
+	// Test system prompt prepending with merging.
+	// When adjacent user messages merge into a single message, system should be
+	// prepended to currentMessage only (no history entry), avoiding payload duplication.
 	messages := []map[string]interface{}{
 		{
 			"role":    "user",
@@ -168,20 +168,18 @@ func TestBuildRequestBody_MergeWithSystemPrompt(t *testing.T) {
 
 	convState := req["conversationState"].(map[string]interface{})
 
-	// Check history[0] contains system prompt + merged user content
-	history := convState["history"].([]interface{})
-	require.GreaterOrEqual(t, len(history), 1, "history should have at least 1 entry")
-	historyItem := history[0].(map[string]interface{})
-	historyUserMsg := historyItem["userInputMessage"].(map[string]interface{})
-	historyContent := historyUserMsg["content"].(string)
-	assert.Contains(t, historyContent, "System Prompt")
-	assert.Contains(t, historyContent, "User 1")
-	assert.Contains(t, historyContent, "User 2")
+	// History should be empty — single merged message + system goes to currentMessage only
+	if historyRaw, hasHistory := convState["history"]; hasHistory {
+		if history, ok := historyRaw.([]interface{}); ok {
+			assert.Empty(t, history, "history should be empty for single merged message + system")
+		}
+	}
 
-	// currentMessage should contain merged user content (without system)
+	// currentMessage should contain system prompt + merged user content
 	currentMsg := convState["currentMessage"].(map[string]interface{})
 	userInput := currentMsg["userInputMessage"].(map[string]interface{})
 	content := userInput["content"].(string)
+	assert.Contains(t, content, "System Prompt")
 	assert.Contains(t, content, "User 1")
 	assert.Contains(t, content, "User 2")
 }

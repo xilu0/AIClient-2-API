@@ -376,8 +376,18 @@ func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool,
 	startIndex := 0
 
 	if system != "" {
-		if len(mergedMessages) > 0 && mergedMessages[0].Role == "user" {
-			// Add system + first user message to history (matching Node.js behavior)
+		if len(mergedMessages) == 1 && mergedMessages[0].Role == "user" {
+			// Single user message: prepend system to the message content directly.
+			// This avoids creating a history entry that duplicates the user content,
+			// which can cause "Input is too long" errors when payloads are large.
+			// The combined content will end up in currentMessage only.
+			userText := mergedMessages[0].UserContent.Text
+			if userText == "" {
+				userText = "Continue"
+			}
+			mergedMessages[0].UserContent.Text = system + "\n\n" + userText
+		} else if len(mergedMessages) > 0 && mergedMessages[0].Role == "user" {
+			// Multiple messages: system+first_user → history
 			firstUserContent := mergedMessages[0].UserContent.Text
 			if firstUserContent == "" {
 				firstUserContent = "Continue"

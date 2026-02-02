@@ -3,6 +3,7 @@ package unit
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/anthropics/AIClient-2-API/internal/kiro"
@@ -69,6 +70,70 @@ func TestBuildRequestBody_WithSystemPrompt(t *testing.T) {
 	userInput := historyItem["userInputMessage"].(map[string]interface{})
 	assert.Contains(t, userInput["content"], "You are a math tutor.")
 	assert.Contains(t, userInput["content"], "What is 2+2?")
+}
+
+func TestBuildRequestBody_SingleMessageWithSystemPrompt(t *testing.T) {
+	// When there's only 1 user message + system prompt, system should be merged
+	// into currentMessage without creating a history entry. This prevents payload
+	// duplication that can cause "Input is too long" errors.
+	messages := []map[string]interface{}{
+		{
+			"role":    "user",
+			"content": "Hello, how are you?",
+		},
+	}
+	messagesJSON, err := json.Marshal(messages)
+	require.NoError(t, err)
+
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "You are a helpful assistant.", "", nil)
+	require.NoError(t, err)
+
+	var req map[string]interface{}
+	err = json.Unmarshal(body, &req)
+	require.NoError(t, err)
+
+	convState := req["conversationState"].(map[string]interface{})
+
+	// History should be empty (no duplication)
+	_, hasHistory := convState["history"]
+	if hasHistory {
+		history := convState["history"].([]interface{})
+		assert.Empty(t, history, "history should be empty for single message + system prompt")
+	}
+
+	// currentMessage should contain both system prompt and user content
+	currentMsg := convState["currentMessage"].(map[string]interface{})
+	userInput := currentMsg["userInputMessage"].(map[string]interface{})
+	content := userInput["content"].(string)
+	assert.Contains(t, content, "You are a helpful assistant.")
+	assert.Contains(t, content, "Hello, how are you?")
+	assert.Equal(t, "You are a helpful assistant.\n\nHello, how are you?", content)
+}
+
+func TestBuildRequestBody_SingleMessageWithSystemPromptNoPayloadDuplication(t *testing.T) {
+	// Verify that a large single message + system doesn't get duplicated.
+	// Previously, system+user went to history AND user went to currentMessage,
+	// roughly doubling the payload size.
+	largeContent := strings.Repeat("a", 10000) // 10KB of printable content
+	messages := []map[string]interface{}{
+		{
+			"role":    "user",
+			"content": largeContent,
+		},
+	}
+	messagesJSON, err := json.Marshal(messages)
+	require.NoError(t, err)
+
+	systemPrompt := "You are a helpful assistant."
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, systemPrompt, "", nil)
+	require.NoError(t, err)
+
+	// Count occurrences of the large content in the body.
+	// It should appear exactly once (in currentMessage), not twice.
+	bodyStr := string(body)
+	occurrences := strings.Count(bodyStr, largeContent)
+	assert.Equal(t, 1, occurrences,
+		"user content should appear exactly once in the request body (no duplication)")
 }
 
 func TestBuildRequestBody_WithToolResult(t *testing.T) {
