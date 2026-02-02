@@ -207,24 +207,38 @@ kiro-debug/
 ### Implementation Reference
 
 - **Go**: `internal/debug/dumper.go`
-- **Analyzer**: `.claude/skills/analyze-kiro-dumps.js`
-- **Skill**: `.claude/skills/analyze-kiro-dumps.skill.md`
+- **Analyzer**: `.claude/skills/analyze-kiro-dumps/analyze-kiro-dumps.js`
+- **Skill**: `.claude/skills/analyze-kiro-dumps/SKILL.md`
 
 ## Adding New Skills
 
 To add a new skill:
 
-1. Create `.claude/skills/your-skill.skill.md` (skill definition)
-2. Optionally create `.claude/skills/your-skill.js` (implementation)
+1. Create `.claude/skills/your-skill/SKILL.md` (skill entry point with frontmatter)
+2. Optionally add supporting files in the same directory (scripts, templates, etc.)
 3. Add to `package.json` scripts for CLI access
 4. Document in this README
 
-**Skill template:**
+**Directory structure:**
+
+```
+.claude/skills/your-skill/
+├── SKILL.md              # Required - skill entry point
+├── helper.js             # Optional - supporting scripts
+└── reference.md          # Optional - detailed reference
+```
+
+**SKILL.md template:**
 
 ```markdown
-# your-skill
+---
+name: your-skill
+description: Brief description of when to use this skill and what triggers it.
+---
 
-Brief description.
+# Your Skill Name
+
+Description of what this skill does.
 
 ## Usage
 
