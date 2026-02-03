@@ -5,7 +5,9 @@ description: Use when diagnosing "Improperly formed request" 400 errors from Kir
 
 # Kiro Request Diagnostic Tool
 
-Performs elimination-based diagnosis on failing Kiro API requests to pinpoint the exact component (tools, history messages, toolResults) causing "Improperly formed request" errors.
+Performs elimination-based diagnosis on failing Kiro API requests to pinpoint the exact component causing "Improperly formed request" errors.
+
+**CRITICAL**: Analysis alone is not enough. Every hypothesis MUST be validated by sending a modified request to the actual Kiro API.
 
 ## Usage
 
@@ -13,169 +15,231 @@ Performs elimination-based diagnosis on failing Kiro API requests to pinpoint th
 /diagnose-kiro-request <path-to-kiro_request.json>
 ```
 
-Examples:
-```bash
-/diagnose-kiro-request kiro-debug/errors/468649d5-d2e4-40cd-b3b6-d91da1db1cf5/kiro_request.json
-/diagnose-kiro-request /tmp/failing-request.json
+## Core Principle: Hypothesis → Verification
+
+**DO NOT** assume your analysis is correct. Follow this workflow:
+
 ```
-
-## Prerequisites
-
-1. **Healthy Kiro account in Redis** - The test needs a working account to send requests
-2. **Go environment** - Tests run via `go test`
-3. **Redis running** - Account selection requires Redis
+1. Static Analysis → Form Hypothesis
+2. Create Modified Request → Apply Hypothesized Fix
+3. Send to Kiro API → Verify PASS
+4. Only then → Hypothesis Confirmed
+```
 
 ## Instructions
 
-When this skill is invoked:
+### Phase 1: Static Analysis
 
-### 1. Validate Input
-
-Check that the provided path exists and contains a valid `kiro_request.json`:
+#### 1.1 Examine the Error Sample
 
 ```bash
-ls -la <path>
-head -c 500 <path>
+# Check metadata
+cat <session_dir>/metadata.json
+
+# Analyze request structure
+python3 << 'PYEOF'
+import json
+with open('<session_dir>/kiro_request.json') as f:
+    data = json.load(f)
+cs = data.get('conversationState', {})
+history = cs.get('history', [])
+# ... analyze structure
+PYEOF
 ```
 
-Verify it has the expected structure:
-- `conversationState.currentMessage`
-- `conversationState.history` (optional)
-- Tools in `userInputMessageContext.tools`
+#### 1.2 Check Known Problem Patterns
 
-### 2. Run Diagnostic Test
+| Pattern | How to Detect |
+|---------|---------------|
+| Empty input | `input: {}` for tools with required params |
+| Fragmented toolUse | Multiple entries with same `toolUseId`, `input.raw_arguments` |
+| Orphan toolResult | `toolUseId` has no matching toolUse in history |
+| Large content | Content > 50KB |
+| Invalid characters | Control characters, invalid Unicode |
 
-Execute the Go integration test with the file path:
+#### 1.3 Form Hypothesis
 
-```bash
-KIRO_REQUEST_FILE=<path> go test ./tests/integration/... -v -run TestKiroRequestDiagnose -timeout 300s 2>&1 | tee /tmp/diagnose-output.txt
-```
-
-### 3. Interpret Results
-
-The test performs these elimination steps:
-
-| Test | What it removes | If succeeds |
-|------|-----------------|-------------|
-| `original` | Nothing | Baseline should FAIL |
-| `no-tools` | All tools | Problem in tools |
-| `no-history` | All history | Problem in history |
-| `no-history-no-tools` | Both | Multiple issues |
-| `tools-N` | Keep first N tools | Binary search |
-| `no-toolResults` | toolResults | Problem in toolResults |
-| `history-empty` | All history | Confirms history issue |
-| `history-keep-N` | Keep first N messages | Binary search |
-
-### 4. Key Patterns to Look For
-
-**Boundary Lines** - These indicate the exact problem location:
-```
-=== Boundary: history[0:51] OK, history[0:52] FAIL ===
-=== Problem message is history[51] ===
-```
-
-**Warning Markers** - Potential issues:
-```
-⚠️ EMPTY INPUT - potential problem!
-⚠️ LARGE INPUT (N bytes) - potential size issue
-⚠️ toolResult[0] has NO matching toolUse in history!
-```
-
-**Success Confirmations**:
-```
-✓ Confirmed: removing only history[51] fixes the issue
-```
-
-### 5. Generate Report
-
-After test completion, summarize findings:
+Document your hypothesis clearly:
 
 ```markdown
-## Kiro Request Diagnosis Report
+## Hypothesis
 
-**File**: <path>
-**Status**: Problem identified / Multiple issues / Unknown
-
-### Summary
-- Original request: FAIL
-- Without history: PASS
-- Problem location: history[51]
-
-### Problem Details
-- Message type: assistantResponseMessage
-- Contains: 3 toolUses
-- Specific issue: toolUse[1] (Write) has empty input
-
-### Recommendation
-Remove or fix history[51] before retrying the request.
+**Problem**: history[3] contains a Read toolUse with empty input
+**Expected Fix**: Remove history[3] and history[4] (the corresponding toolResult)
+**Rationale**: Read tool requires file_path parameter
 ```
 
-### 6. Create Minimal Reproduction (Optional)
+### Phase 2: Verify Hypothesis (REQUIRED)
 
-If user wants to create a minimal test case:
+**You MUST verify your hypothesis before considering it confirmed.**
 
-1. Extract the problem element (specific history message, tool, or toolResult)
-2. Create a minimal request with just that element
-3. Verify it fails
-4. Save as `minimal-reproduction.json`
+#### 2.1 Create Modified Request
 
-## Diagnostic Flow Diagram
+```python
+import json
+
+with open('<session_dir>/kiro_request.json') as f:
+    data = json.load(f)
+
+# Apply your hypothesized fix
+# Example: Remove problematic history entries
+history = data['conversationState']['history']
+fixed_history = history[:3] + history[5:]  # Remove indices 3 and 4
+data['conversationState']['history'] = fixed_history
+
+with open('/tmp/fixed_kiro_request.json', 'w') as f:
+    json.dump(data, f)
+```
+
+#### 2.2 Send to Kiro API
+
+Use the integration test to send the modified request:
+
+```bash
+KIRO_REQUEST_FILE=/tmp/fixed_kiro_request.json \
+go test ./tests/integration/... -v -run TestKiroRequestDiagnose -timeout 60s
+```
+
+**Expected Result**:
+- `[original] ✓ SUCCESS` → Hypothesis verified!
+- `[original] ✗ FAILED` → Hypothesis wrong, iterate
+
+#### 2.3 Iterate if Needed
+
+If verification fails:
+1. Re-examine the error
+2. Form new hypothesis
+3. Repeat verification
+
+### Phase 3: Implement Fix
+
+Once hypothesis is verified:
+
+1. **Implement code fix** in the Go service
+2. **Add unit test** covering the pattern
+3. **Commit changes**
+
+### Phase 4: Post-Deployment Verification (REQUIRED)
+
+After deployment, verify the original sample now passes:
+
+#### 4.1 Integration Test with Original Sample
+
+```bash
+# Test that the original error sample now passes through the service
+KIRO_REQUEST_FILE=<original_sample_path> \
+go test ./tests/integration/... -v -run TestKiroRequestDiagnose -timeout 60s
+```
+
+#### 4.2 End-to-End Test (if available)
+
+Send the original Claude request through the full service:
+
+```bash
+# If request.json exists in the error session
+curl -X POST http://localhost:8081/v1/messages \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: <API_KEY>" \
+  -d @<session_dir>/request.json
+```
+
+#### 4.3 Success Criteria
+
+- [ ] Original kiro_request.json passes Kiro API
+- [ ] Unit tests pass
+- [ ] No regression in other tests
+
+## Diagnostic Flow
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    Elimination Flow                          │
+│                    Diagnosis Workflow                        │
 ├─────────────────────────────────────────────────────────────┤
 │                                                              │
-│  Step 1: Baseline                                            │
-│  └─ original → FAIL (confirm problem exists)                 │
+│  Phase 1: Static Analysis                                    │
+│  ├─ Examine error metadata and request structure             │
+│  ├─ Check for known patterns (empty input, fragments, etc)   │
+│  └─ Form hypothesis                                          │
 │                                                              │
-│  Step 2: Coarse Elimination                                  │
-│  ├─ no-tools → PASS? → Binary search tools                   │
-│  ├─ no-history → PASS? → Binary search history               │
-│  └─ no-toolResults → PASS? → Check orphan references         │
+│  Phase 2: Hypothesis Verification (CRITICAL)                 │
+│  ├─ Create modified request with fix applied                 │
+│  ├─ Send to Kiro API                                         │
+│  ├─ If PASS → hypothesis confirmed                           │
+│  └─ If FAIL → iterate, form new hypothesis                   │
 │                                                              │
-│  Step 3: Binary Search (if applicable)                       │
-│  ├─ Tools: tools-1, tools-5, tools-10... → boundary          │
-│  └─ History: history-keep-N → boundary (newest first)        │
+│  Phase 3: Implement Fix                                      │
+│  ├─ Write code fix                                           │
+│  ├─ Add unit tests                                           │
+│  └─ Commit changes                                           │
 │                                                              │
-│  Step 4: Deep Analysis                                       │
-│  ├─ Analyze problem message fields                           │
-│  ├─ Check for empty inputs, large content                    │
-│  └─ Test individual toolUses in problem message              │
-│                                                              │
-│  Step 5: Confirm                                             │
-│  └─ Remove only problem element → PASS? → Confirmed          │
+│  Phase 4: Post-Deployment Verification                       │
+│  ├─ Run integration test with original sample                │
+│  ├─ Verify original sample now passes                        │
+│  └─ Confirm no regression                                    │
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Why Reverse History Elimination?
+## Known Problem Patterns
 
-The test searches history from **newest to oldest** because:
+### Pattern 1: Empty Input for Required-Param Tools
 
-1. **Old messages were successful** - They became history because previous requests worked
-2. **New messages are most suspicious** - They were just added and could introduce problems
-3. **Faster convergence** - Binary search from the newest end finds issues quicker
+**Symptom**: `input: {}` for tools like Read, Write, Bash that require parameters
 
-## Common Issues Found
-
-| Issue | Symptom | Fix |
-|-------|---------|-----|
-| Empty toolUse input | `⚠️ EMPTY INPUT` | Remove the toolUse or add valid input |
-| Orphan toolResult | `NO matching toolUse in history` | Remove the toolResult |
-| Large content | `⚠️ LARGE INPUT (N bytes)` | Truncate or summarize content |
-| Cumulative size | All messages fail individually | Reduce overall history length |
-
-## Test File Location
-
-The diagnostic test is implemented in:
-```
-tests/integration/kiro_request_diagnose_test.go
+**Detection**:
+```python
+for tu in toolUses:
+    if tu.get('input') == {} and tu.get('name') in ['Read', 'Write', 'Bash', ...]:
+        print(f"Empty input: {tu}")
 ```
 
-Key functions:
-- `TestKiroRequestDiagnose` - Main test entry point
-- `reverseEliminateHistory` - Binary search on history
-- `testToolResults` - ToolResults elimination
-- `analyzeMessage` - Detailed message analysis
-- `deepDiveToolUses` - Individual toolUse testing
+**Fix**: Remove toolUse AND corresponding toolResult
+
+### Pattern 2: Fragmented Streaming ToolUse
+
+**Symptom**: Multiple entries with same `toolUseId`, each with `input.raw_arguments` fragment
+
+**Detection**:
+```python
+from collections import defaultdict
+by_id = defaultdict(list)
+for tu in toolUses:
+    by_id[tu['toolUseId']].append(tu)
+for tid, tus in by_id.items():
+    if len(tus) > 1:
+        print(f"Fragmented: {tid}")
+```
+
+**Fix**: Aggregate fragments, merge raw_arguments, parse as JSON
+
+### Pattern 3: Orphan ToolResult
+
+**Symptom**: toolResult references toolUseId that doesn't exist in history
+
+**Detection**:
+```python
+all_ids = {tu['toolUseId'] for msg in history for tu in msg.get('toolUses', [])}
+for tr in toolResults:
+    if tr['toolUseId'] not in all_ids:
+        print(f"Orphan: {tr}")
+```
+
+**Fix**: Remove orphan toolResult
+
+## Test File Locations
+
+- **Integration test**: `tests/integration/kiro_request_diagnose_test.go`
+- **Unit tests**: `tests/unit/kiro_request_merge_test.go`
+- **Request builder**: `internal/kiro/client.go` (`BuildRequestBody`, `parseAssistantContent`)
+
+## Checklist
+
+- [ ] Static analysis complete
+- [ ] Hypothesis documented
+- [ ] Modified request created
+- [ ] Hypothesis verified via Kiro API
+- [ ] Code fix implemented
+- [ ] Unit test added
+- [ ] Committed
+- [ ] Post-deployment: original sample passes
+- [ ] No regression
