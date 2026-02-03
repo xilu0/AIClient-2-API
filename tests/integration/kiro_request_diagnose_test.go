@@ -275,26 +275,385 @@ func TestKiroRequestDiagnose(t *testing.T) {
 		}
 	}
 
-	// --- Test 6: Check specific history messages ---
+	// --- Test 6: ToolResults elimination ---
+	t.Log("=== Test 6: ToolResults elimination ===")
+	testToolResults(t, original, originalHistory, deepClone, sendAndReport)
+
+	// --- Test 7: Reverse elimination on history (newest first) ---
+	// Rationale: Old messages became history because previous requests succeeded.
+	// The newest messages are most likely to have introduced the problem.
 	if len(originalHistory) > 0 {
-		t.Log("=== Test 6: History inspection ===")
-		for i, msg := range originalHistory {
-			msgMap, ok := msg.(map[string]interface{})
+		t.Log("=== Test 7: History reverse elimination (newest first) ===")
+		reverseEliminateHistory(t, original, originalHistory, deepClone, sendAndReport)
+	}
+}
+
+// reverseEliminateHistory tests history from newest to oldest.
+// Rationale: Old messages became history because previous requests succeeded.
+// Newest messages are most suspicious.
+func reverseEliminateHistory(
+	t *testing.T,
+	original map[string]interface{},
+	originalHistory []interface{},
+	deepClone func(map[string]interface{}) map[string]interface{},
+	sendAndReport func(string, map[string]interface{}) bool,
+) {
+	n := len(originalHistory)
+	t.Logf("History has %d messages, testing from newest (index %d) to oldest", n, n-1)
+
+	// Step 1: Test empty history first
+	variant := deepClone(original)
+	cs := variant["conversationState"].(map[string]interface{})
+	cs["history"] = []interface{}{}
+	if !sendAndReport("history-empty", variant) {
+		t.Log("Even empty history fails - problem not in history content")
+		return
+	}
+	t.Log("Empty history succeeds - problem is in history content")
+
+	// Step 2: Binary search to find the first problematic message
+	// We look for the boundary where history[0:i] succeeds but history[0:i+1] fails
+	lo, hi := 0, n
+	for lo < hi {
+		mid := (lo + hi + 1) / 2 // bias toward higher to find first failure
+		variant := deepClone(original)
+		cs := variant["conversationState"].(map[string]interface{})
+		cs["history"] = originalHistory[:mid]
+
+		name := "history-keep-" + itoa(mid)
+		if sendAndReport(name, variant) {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+
+	// lo is now the max number of messages that work
+	boundary := lo
+	if boundary >= n {
+		t.Log("All history messages work - problem might be cumulative (size or elsewhere)")
+		return
+	}
+
+	t.Logf("=== Boundary: history[0:%d] OK, history[0:%d] FAIL ===", boundary, boundary+1)
+	t.Logf("=== Problem message is history[%d] ===", boundary)
+
+	// Analyze the problematic message
+	analyzeMessage(t, boundary, originalHistory[boundary])
+
+	// Confirm: send all history EXCEPT the problematic message
+	if boundary < n {
+		t.Log("=== Confirm: all history except problematic message ===")
+		confirmHistory := make([]interface{}, 0, n-1)
+		confirmHistory = append(confirmHistory, originalHistory[:boundary]...)
+		if boundary+1 < n {
+			confirmHistory = append(confirmHistory, originalHistory[boundary+1:]...)
+		}
+		confirmVariant := deepClone(original)
+		confirmCs := confirmVariant["conversationState"].(map[string]interface{})
+		confirmCs["history"] = confirmHistory
+		if sendAndReport("without-history-"+itoa(boundary), confirmVariant) {
+			t.Logf("✓ Confirmed: removing only history[%d] fixes the issue", boundary)
+		} else {
+			t.Logf("✗ Removing history[%d] alone doesn't fix it - might be multiple issues", boundary)
+		}
+	}
+
+	// Deep dive: if problem message is assistantResponseMessage with toolUses,
+	// test each toolUse individually
+	if boundary < n {
+		deepDiveToolUses(t, original, originalHistory, boundary, deepClone, sendAndReport)
+	}
+}
+
+// analyzeMessage logs details about a problematic message
+func analyzeMessage(t *testing.T, index int, msg interface{}) {
+	msgMap, ok := msg.(map[string]interface{})
+	if !ok {
+		t.Logf("Message[%d] is not a map", index)
+		return
+	}
+
+	msgBytes, _ := json.Marshal(msgMap)
+	t.Logf("Problem message[%d] size: %d bytes", index, len(msgBytes))
+
+	// Check assistantResponseMessage
+	if arm, ok := msgMap["assistantResponseMessage"].(map[string]interface{}); ok {
+		t.Logf("Problem message[%d] is assistantResponseMessage", index)
+
+		// Check content
+		if content, ok := arm["content"].(string); ok {
+			t.Logf("  content_len=%d", len(content))
+			if len(content) > 200 {
+				t.Logf("  content_preview: %s...", content[:200])
+			} else if len(content) > 0 {
+				t.Logf("  content_preview: %s", content)
+			}
+		}
+
+		// Check toolUses
+		if toolUses, ok := arm["toolUses"].([]interface{}); ok {
+			t.Logf("  Has %d toolUses", len(toolUses))
+			for i, tu := range toolUses {
+				analyzeToolUse(t, i, tu)
+			}
+		}
+	}
+
+	// Check userInputMessage
+	if uim, ok := msgMap["userInputMessage"].(map[string]interface{}); ok {
+		t.Logf("Problem message[%d] is userInputMessage", index)
+
+		// Check content
+		if content, ok := uim["content"].(string); ok {
+			t.Logf("  content_len=%d", len(content))
+		}
+
+		// Check userInputMessageContext
+		if ctx, ok := uim["userInputMessageContext"].(map[string]interface{}); ok {
+			// Check toolResults
+			if trs, ok := ctx["toolResults"].([]interface{}); ok {
+				t.Logf("  Has %d toolResults in context", len(trs))
+				for i, tr := range trs {
+					analyzeToolResult(t, i, tr)
+				}
+			}
+		}
+	}
+}
+
+// analyzeToolUse logs details about a toolUse entry
+func analyzeToolUse(t *testing.T, index int, tu interface{}) {
+	tuMap, ok := tu.(map[string]interface{})
+	if !ok {
+		return
+	}
+
+	toolUseId, _ := tuMap["toolUseId"].(string)
+	name, _ := tuMap["name"].(string)
+	input := tuMap["input"]
+	inputBytes, _ := json.Marshal(input)
+
+	t.Logf("  toolUse[%d]: name=%s toolUseId=%s input_size=%d", index, name, toolUseId, len(inputBytes))
+
+	// Check for empty input (potential problem!)
+	if inputMap, ok := input.(map[string]interface{}); ok {
+		if len(inputMap) == 0 {
+			t.Logf("    ⚠️ EMPTY INPUT - potential problem!")
+		}
+		// Log input keys
+		keys := make([]string, 0, len(inputMap))
+		for k := range inputMap {
+			keys = append(keys, k)
+		}
+		if len(keys) > 0 && len(keys) <= 10 {
+			t.Logf("    input keys: %v", keys)
+		}
+	}
+
+	// Check for very large input
+	if len(inputBytes) > 10000 {
+		t.Logf("    ⚠️ LARGE INPUT (%d bytes) - potential size issue", len(inputBytes))
+	}
+}
+
+// analyzeToolResult logs details about a toolResult entry
+func analyzeToolResult(t *testing.T, index int, tr interface{}) {
+	trMap, ok := tr.(map[string]interface{})
+	if !ok {
+		return
+	}
+
+	toolUseId, _ := trMap["toolUseId"].(string)
+	status, _ := trMap["status"].(string)
+	content := trMap["content"]
+	contentBytes, _ := json.Marshal(content)
+
+	t.Logf("  toolResult[%d]: toolUseId=%s status=%s content_size=%d", index, toolUseId, status, len(contentBytes))
+
+	// Check for very large content
+	if len(contentBytes) > 50000 {
+		t.Logf("    ⚠️ LARGE CONTENT (%d bytes) - potential size issue", len(contentBytes))
+	}
+}
+
+// testToolResults checks if toolResults in currentMessage cause the problem
+func testToolResults(
+	t *testing.T,
+	original map[string]interface{},
+	originalHistory []interface{},
+	deepClone func(map[string]interface{}) map[string]interface{},
+	sendAndReport func(string, map[string]interface{}) bool,
+) {
+	// Navigate to toolResults
+	cs, ok := original["conversationState"].(map[string]interface{})
+	if !ok {
+		t.Log("No conversationState")
+		return
+	}
+	cm, ok := cs["currentMessage"].(map[string]interface{})
+	if !ok {
+		t.Log("No currentMessage")
+		return
+	}
+	uim, ok := cm["userInputMessage"].(map[string]interface{})
+	if !ok {
+		t.Log("No userInputMessage")
+		return
+	}
+	ctx, ok := uim["userInputMessageContext"].(map[string]interface{})
+	if !ok {
+		t.Log("No userInputMessageContext")
+		return
+	}
+
+	trs, ok := ctx["toolResults"].([]interface{})
+	if !ok || len(trs) == 0 {
+		t.Log("No toolResults to test")
+		return
+	}
+
+	t.Logf("Found %d toolResults in currentMessage", len(trs))
+
+	// Test: remove toolResults entirely
+	variant := deepClone(original)
+	delete(variant["conversationState"].(map[string]interface{})["currentMessage"].(map[string]interface{})["userInputMessage"].(map[string]interface{})["userInputMessageContext"].(map[string]interface{}), "toolResults")
+
+	if sendAndReport("no-toolResults", variant) {
+		t.Log("⚠️ SUCCESS without toolResults - problem might be in toolResults")
+
+		// Check each toolResult for orphan references
+		for i, tr := range trs {
+			trMap, ok := tr.(map[string]interface{})
 			if !ok {
 				continue
 			}
+			toolUseId, _ := trMap["toolUseId"].(string)
 
-			// Log message summary
-			msgType := "unknown"
-			if uim, ok := msgMap["userInputMessage"]; ok && uim != nil {
-				msgType = "userInput"
-			}
-			if ar, ok := msgMap["assistantResponseMessage"]; ok && ar != nil {
-				msgType = "assistantResponse"
+			// Check if there's a matching toolUse in history
+			found := findToolUseInHistory(originalHistory, toolUseId)
+			if !found {
+				t.Logf("  ⚠️ toolResult[%d] toolUseId=%s has NO matching toolUse in history!", i, toolUseId)
+			} else {
+				t.Logf("  ✓ toolResult[%d] toolUseId=%s has matching toolUse", i, toolUseId)
 			}
 
-			msgBytes, _ := json.Marshal(msgMap)
-			t.Logf("History[%d]: type=%s size=%d bytes", i, msgType, len(msgBytes))
+			// Analyze the toolResult
+			analyzeToolResult(t, i, tr)
+		}
+
+		// If multiple toolResults, test each one individually
+		if len(trs) > 1 {
+			t.Log("=== Testing each toolResult individually ===")
+			for i := range trs {
+				// Create request with only this toolResult removed
+				testVariant := deepClone(original)
+				testCtx := testVariant["conversationState"].(map[string]interface{})["currentMessage"].(map[string]interface{})["userInputMessage"].(map[string]interface{})["userInputMessageContext"].(map[string]interface{})
+
+				remainingTrs := make([]interface{}, 0, len(trs)-1)
+				remainingTrs = append(remainingTrs, trs[:i]...)
+				remainingTrs = append(remainingTrs, trs[i+1:]...)
+				testCtx["toolResults"] = remainingTrs
+
+				name := "without-toolResult-" + itoa(i)
+				if sendAndReport(name, testVariant) {
+					t.Logf("  ⚠️ toolResult[%d] might be problematic", i)
+				}
+			}
+		}
+	} else {
+		t.Log("Request still fails without toolResults - problem is elsewhere")
+	}
+}
+
+// findToolUseInHistory checks if a toolUseId exists in history
+func findToolUseInHistory(history []interface{}, toolUseId string) bool {
+	for _, msg := range history {
+		msgMap, ok := msg.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Check assistantResponseMessage
+		if arm, ok := msgMap["assistantResponseMessage"].(map[string]interface{}); ok {
+			if toolUses, ok := arm["toolUses"].([]interface{}); ok {
+				for _, tu := range toolUses {
+					tuMap, ok := tu.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					if id, ok := tuMap["toolUseId"].(string); ok && id == toolUseId {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// deepDiveToolUses tests individual toolUses within a problematic message
+func deepDiveToolUses(
+	t *testing.T,
+	original map[string]interface{},
+	originalHistory []interface{},
+	problemIndex int,
+	deepClone func(map[string]interface{}) map[string]interface{},
+	sendAndReport func(string, map[string]interface{}) bool,
+) {
+	msgMap, ok := originalHistory[problemIndex].(map[string]interface{})
+	if !ok {
+		return
+	}
+
+	arm, ok := msgMap["assistantResponseMessage"].(map[string]interface{})
+	if !ok {
+		return
+	}
+
+	toolUses, ok := arm["toolUses"].([]interface{})
+	if !ok || len(toolUses) == 0 {
+		return
+	}
+
+	if len(toolUses) == 1 {
+		t.Log("Only one toolUse in problem message - no further subdivision possible")
+		return
+	}
+
+	t.Logf("=== Deep dive: testing %d toolUses in history[%d] ===", len(toolUses), problemIndex)
+
+	// Test removing each toolUse individually
+	for i := range toolUses {
+		// Clone original
+		variant := deepClone(original)
+		cs := variant["conversationState"].(map[string]interface{})
+		historyClone := make([]interface{}, len(originalHistory))
+		for j := range originalHistory {
+			if j == problemIndex {
+				// Deep clone the problem message
+				msgClone := deepClone(originalHistory[j].(map[string]interface{}))
+				armClone := msgClone["assistantResponseMessage"].(map[string]interface{})
+
+				// Remove toolUse[i]
+				remainingToolUses := make([]interface{}, 0, len(toolUses)-1)
+				remainingToolUses = append(remainingToolUses, toolUses[:i]...)
+				remainingToolUses = append(remainingToolUses, toolUses[i+1:]...)
+				armClone["toolUses"] = remainingToolUses
+
+				historyClone[j] = msgClone
+			} else {
+				historyClone[j] = originalHistory[j]
+			}
+		}
+		cs["history"] = historyClone
+
+		tuMap := toolUses[i].(map[string]interface{})
+		name, _ := tuMap["name"].(string)
+		testName := "without-toolUse-" + itoa(i) + "-" + name
+
+		if sendAndReport(testName, variant) {
+			t.Logf("  ⚠️ toolUse[%d] (%s) in history[%d] is problematic", i, name, problemIndex)
 		}
 	}
 }

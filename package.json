@@ -52,6 +52,7 @@
     "test:redis:stress": "node tests/redis-stress-test.js",
     "test:redis:benchmark": "node tests/redis-benchmark.js",
     "test:tools-benchmark": "node tests/claude-tools-benchmark.js",
-    "analyze:dumps": "node .claude/skills/analyze-kiro-dumps.js"
+    "analyze:dumps": "node .claude/skills/analyze-kiro-dumps.js",
+    "diagnose:kiro": "bash -c 'KIRO_REQUEST_FILE=\"$1\" go test ./tests/integration/... -v -run TestKiroRequestDiagnose -timeout 300s' --"
   }
 }

@@ -228,9 +228,12 @@ func TestBuildRequestBody_EmptyContentFallback(t *testing.T) {
 	assert.Equal(t, "Tool results provided.", userMsg["content"])
 }
 
-func TestBuildRequestBody_PreservesEmptyInputToolUseAndResult(t *testing.T) {
-	// Test that tool_use with empty input is preserved (not filtered).
-	// Tools like TaskList have input: {} which is valid for Kiro API.
+func TestBuildRequestBody_FiltersEmptyInputToolUseWithoutToolResult(t *testing.T) {
+	// Test that tool_use with empty input is filtered ONLY when there's no corresponding toolResult.
+	// If a tool requires params but input is {}, and there's NO toolResult referencing it,
+	// the toolUse should be filtered to prevent "Improperly formed request" errors.
+	// However, if there IS a toolResult referencing it, the toolUse must be preserved
+	// to avoid creating orphan toolResults.
 	messages := []map[string]interface{}{
 		{
 			"role":    "user",
@@ -247,9 +250,82 @@ func TestBuildRequestBody_PreservesEmptyInputToolUseAndResult(t *testing.T) {
 				},
 				{
 					"type":  "tool_use",
-					"id":    "tool_empty",
+					"id":    "tool_empty_unreferenced",
 					"name":  "empty_tool",
-					"input": map[string]string{}, // Empty input - should be preserved
+					"input": map[string]string{}, // Empty input, NO toolResult - should be filtered
+				},
+			},
+		},
+		{
+			"role": "user",
+			"content": []map[string]interface{}{
+				{
+					"type":        "tool_result",
+					"tool_use_id": "tool_valid",
+					"content":     "Valid result",
+				},
+				// Note: NO tool_result for tool_empty_unreferenced
+			},
+		},
+	}
+	messagesJSON, err := json.Marshal(messages)
+	require.NoError(t, err)
+
+	// No tools passed - empty input toolUses without toolResult are filtered
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
+	require.NoError(t, err)
+
+	var req map[string]interface{}
+	err = json.Unmarshal(body, &req)
+	require.NoError(t, err)
+
+	convState := req["conversationState"].(map[string]interface{})
+	history := convState["history"].([]interface{})
+
+	// Expected structure:
+	// 1. User: "Run tools"
+	// 2. Assistant: Only valid_tool preserved (tool_empty_unreferenced filtered)
+
+	require.Len(t, history, 2)
+
+	// Check assistant message - should have only valid_tool
+	assistantMsg := history[1].(map[string]interface{})["assistantResponseMessage"].(map[string]interface{})
+	toolUses := assistantMsg["toolUses"].([]interface{})
+	assert.Len(t, toolUses, 1)
+	assert.Equal(t, "tool_valid", toolUses[0].(map[string]interface{})["toolUseId"])
+
+	// Check currentMessage - only 1 tool_result (for tool_valid)
+	currentMsg := convState["currentMessage"].(map[string]interface{})
+	userInput := currentMsg["userInputMessage"].(map[string]interface{})
+	context := userInput["userInputMessageContext"].(map[string]interface{})
+	toolResults := context["toolResults"].([]interface{})
+	assert.Len(t, toolResults, 1)
+}
+
+func TestBuildRequestBody_RemovesEmptyInputToolUseAndToolResult(t *testing.T) {
+	// Test that tool_use with empty input AND its corresponding toolResult are BOTH removed.
+	// This prevents "Improperly formed request" errors from Kiro API.
+	// The old behavior was to preserve empty-input toolUses if they had a toolResult,
+	// but this still caused API errors because the empty input violates the tool schema.
+	messages := []map[string]interface{}{
+		{
+			"role":    "user",
+			"content": "Run tools",
+		},
+		{
+			"role": "assistant",
+			"content": []map[string]interface{}{
+				{
+					"type":  "tool_use",
+					"id":    "tool_valid",
+					"name":  "valid_tool",
+					"input": map[string]string{"arg": "value"},
+				},
+				{
+					"type":  "tool_use",
+					"id":    "tool_empty_referenced",
+					"name":  "empty_tool",
+					"input": map[string]string{}, // Empty input - should be REMOVED along with its toolResult
 				},
 			},
 		},
@@ -263,8 +339,8 @@ func TestBuildRequestBody_PreservesEmptyInputToolUseAndResult(t *testing.T) {
 				},
 				{
 					"type":        "tool_result",
-					"tool_use_id": "tool_empty",
-					"content":     "Empty tool result - should be preserved",
+					"tool_use_id": "tool_empty_referenced",
+					"content":     "Empty tool error result", // Should be REMOVED
 				},
 			},
 		},
@@ -272,7 +348,26 @@ func TestBuildRequestBody_PreservesEmptyInputToolUseAndResult(t *testing.T) {
 	messagesJSON, err := json.Marshal(messages)
 	require.NoError(t, err)
 
-	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
+	// Define tools with required params (empty_tool requires params)
+	tools := []map[string]interface{}{
+		{
+			"name": "valid_tool",
+			"input_schema": map[string]interface{}{
+				"type":     "object",
+				"required": []string{"arg"},
+			},
+		},
+		{
+			"name": "empty_tool",
+			"input_schema": map[string]interface{}{
+				"type":     "object",
+				"required": []string{"required_param"}, // Has required param, so empty input is invalid
+			},
+		},
+	}
+	toolsJSON, _ := json.Marshal(tools)
+
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", toolsJSON)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -284,31 +379,28 @@ func TestBuildRequestBody_PreservesEmptyInputToolUseAndResult(t *testing.T) {
 
 	// Expected structure:
 	// 1. User: "Run tools"
-	// 2. Assistant: Both tool_valid and tool_empty preserved
+	// 2. Assistant: Only valid_tool preserved (empty_tool removed)
 
 	require.Len(t, history, 2)
 
-	// Check assistant message - should have both tool_uses
+	// Check assistant message - should have only ONE toolUse (valid_tool)
 	assistantMsg := history[1].(map[string]interface{})["assistantResponseMessage"].(map[string]interface{})
 	toolUses := assistantMsg["toolUses"].([]interface{})
-	assert.Len(t, toolUses, 2)
+	assert.Len(t, toolUses, 1, "Only valid_tool should remain, empty_tool should be removed")
 	assert.Equal(t, "tool_valid", toolUses[0].(map[string]interface{})["toolUseId"])
-	assert.Equal(t, "tool_empty", toolUses[1].(map[string]interface{})["toolUseId"])
 
-	// Check currentMessage - should have both tool_results
+	// Check currentMessage - only valid tool_result present
 	currentMsg := convState["currentMessage"].(map[string]interface{})
 	userInput := currentMsg["userInputMessage"].(map[string]interface{})
 	context := userInput["userInputMessageContext"].(map[string]interface{})
 	toolResults := context["toolResults"].([]interface{})
-
-	assert.Len(t, toolResults, 2)
+	assert.Len(t, toolResults, 1, "Only tool_valid's toolResult should remain")
 	assert.Equal(t, "tool_valid", toolResults[0].(map[string]interface{})["toolUseId"])
-	assert.Equal(t, "tool_empty", toolResults[1].(map[string]interface{})["toolUseId"])
 }
 
-func TestBuildRequestBody_PreservesAllEmptyInputToolUses(t *testing.T) {
-	// Test when ALL tool_uses have empty input - they should all be preserved (not filtered).
-	// This matches Node.js behavior where TaskList with input: {} works correctly.
+func TestBuildRequestBody_PreservesEmptyInputForToolsWithNoRequiredParams(t *testing.T) {
+	// Test that tool_use with empty input is preserved for tools that have NO required params.
+	// Tools like TaskList don't require any parameters, so input: {} is valid.
 	messages := []map[string]interface{}{
 		{
 			"role":    "user",
@@ -339,7 +431,22 @@ func TestBuildRequestBody_PreservesAllEmptyInputToolUses(t *testing.T) {
 	messagesJSON, err := json.Marshal(messages)
 	require.NoError(t, err)
 
-	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
+	// Tool definition for TaskList with NO required params
+	tools := []map[string]interface{}{
+		{
+			"name":        "TaskList",
+			"description": "List all tasks",
+			"input_schema": map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{},
+				// No "required" field - empty input is valid
+			},
+		},
+	}
+	toolsJSON, err := json.Marshal(tools)
+	require.NoError(t, err)
+
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", toolsJSON)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -358,7 +465,7 @@ func TestBuildRequestBody_PreservesAllEmptyInputToolUses(t *testing.T) {
 	// Check assistant message - should have toolUses with the empty-input tool
 	assistantMsg := history[1].(map[string]interface{})["assistantResponseMessage"].(map[string]interface{})
 	toolUses, hasToolUses := assistantMsg["toolUses"].([]interface{})
-	assert.True(t, hasToolUses, "toolUses should be present for empty-input tools")
+	assert.True(t, hasToolUses, "toolUses should be present for tools with no required params")
 	require.Len(t, toolUses, 1)
 	assert.Equal(t, "tool_empty_1", toolUses[0].(map[string]interface{})["toolUseId"])
 	assert.Equal(t, "TaskList", toolUses[0].(map[string]interface{})["name"])
@@ -505,4 +612,224 @@ func TestInjectToolsFromHistory_MultipleTools(t *testing.T) {
 	}
 	assert.True(t, toolNames["Tool1"])
 	assert.True(t, toolNames["Tool2"])
+}
+
+// TestBuildRequestBody_FilterEmptyInputToolUses tests that toolUses with empty input
+// are filtered out along with their corresponding toolResults.
+// This prevents "Improperly formed request" errors from Kiro API.
+func TestBuildRequestBody_FilterEmptyInputToolUses(t *testing.T) {
+	// Simulate a conversation where Claude made a tool call with empty input,
+	// then user provided a tool result for it.
+	// The Read tool requires file_path parameter.
+	messages := []map[string]interface{}{
+		{
+			"role":    "user",
+			"content": "Read a file for me",
+		},
+		{
+			"role": "assistant",
+			"content": []map[string]interface{}{
+				{"type": "text", "text": "I'll read the file."},
+				{
+					"type":       "tool_use",
+					"id":         "tooluse_empty_input_123",
+					"name":       "Read",
+					"input":      map[string]interface{}{}, // Empty input - invalid!
+				},
+			},
+		},
+		{
+			"role": "user",
+			"content": []map[string]interface{}{
+				{
+					"type":        "tool_result",
+					"tool_use_id": "tooluse_empty_input_123",
+					"content":     "Error: file_path is required",
+					"is_error":    true,
+				},
+			},
+		},
+		{
+			"role":    "user",
+			"content": "Please try again with the correct path",
+		},
+	}
+	messagesJSON, err := json.Marshal(messages)
+	require.NoError(t, err)
+
+	// Define Read tool with required file_path
+	tools := []map[string]interface{}{
+		{
+			"name":        "Read",
+			"description": "Read a file",
+			"input_schema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"file_path": map[string]interface{}{
+						"type":        "string",
+						"description": "The file path",
+					},
+				},
+				"required": []string{"file_path"},
+			},
+		},
+	}
+	toolsJSON, err := json.Marshal(tools)
+	require.NoError(t, err)
+
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", toolsJSON)
+	require.NoError(t, err)
+
+	var req map[string]interface{}
+	err = json.Unmarshal(body, &req)
+	require.NoError(t, err)
+
+	convState := req["conversationState"].(map[string]interface{})
+	history := convState["history"].([]interface{})
+
+	// Check that the invalid toolUse and its toolResult have been filtered out
+	for i, item := range history {
+		historyItem := item.(map[string]interface{})
+
+		// Check assistant messages don't have the empty-input toolUse
+		if arm, ok := historyItem["assistantResponseMessage"].(map[string]interface{}); ok {
+			if toolUses, ok := arm["toolUses"].([]interface{}); ok {
+				for _, tu := range toolUses {
+					tuMap := tu.(map[string]interface{})
+					if tuMap["toolUseId"] == "tooluse_empty_input_123" {
+						t.Errorf("history[%d]: Found toolUse with empty input that should have been filtered: %v", i, tuMap)
+					}
+				}
+			}
+		}
+
+		// Check user messages don't have toolResults for the removed toolUse
+		if uim, ok := historyItem["userInputMessage"].(map[string]interface{}); ok {
+			if ctx, ok := uim["userInputMessageContext"].(map[string]interface{}); ok {
+				if trs, ok := ctx["toolResults"].([]interface{}); ok {
+					for _, tr := range trs {
+						trMap := tr.(map[string]interface{})
+						if trMap["toolUseId"] == "tooluse_empty_input_123" {
+							t.Errorf("history[%d]: Found toolResult for removed toolUse: %v", i, trMap)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestBuildRequestBody_KeepEmptyInputForNoRequiredParams tests that toolUses with empty input
+// are kept for tools that have no required parameters (like ExitPlanMode).
+func TestBuildRequestBody_KeepEmptyInputForNoRequiredParams(t *testing.T) {
+	messages := []map[string]interface{}{
+		{
+			"role":    "user",
+			"content": "Exit plan mode",
+		},
+		{
+			"role": "assistant",
+			"content": []map[string]interface{}{
+				{"type": "text", "text": "Exiting plan mode."},
+				{
+					"type":  "tool_use",
+					"id":    "tooluse_exit_plan_456",
+					"name":  "ExitPlanMode",
+					"input": map[string]interface{}{}, // Empty input - valid for this tool!
+				},
+			},
+		},
+		{
+			"role": "user",
+			"content": []map[string]interface{}{
+				{
+					"type":        "tool_result",
+					"tool_use_id": "tooluse_exit_plan_456",
+					"content":     "Plan mode exited",
+				},
+			},
+		},
+		{
+			"role":    "user",
+			"content": "Continue with implementation",
+		},
+	}
+	messagesJSON, err := json.Marshal(messages)
+	require.NoError(t, err)
+
+	// Define ExitPlanMode tool with NO required parameters
+	tools := []map[string]interface{}{
+		{
+			"name":        "ExitPlanMode",
+			"description": "Exit plan mode",
+			"input_schema": map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{},
+				"required":   []string{}, // No required params
+			},
+		},
+	}
+	toolsJSON, err := json.Marshal(tools)
+	require.NoError(t, err)
+
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", toolsJSON)
+	require.NoError(t, err)
+
+	var req map[string]interface{}
+	err = json.Unmarshal(body, &req)
+	require.NoError(t, err)
+
+	convState := req["conversationState"].(map[string]interface{})
+	history := convState["history"].([]interface{})
+
+	// The ExitPlanMode toolUse should be KEPT because it has no required params
+	foundToolUse := false
+	foundToolResult := false
+
+	// Check history for toolUse
+	for _, item := range history {
+		historyItem := item.(map[string]interface{})
+
+		if arm, ok := historyItem["assistantResponseMessage"].(map[string]interface{}); ok {
+			if toolUses, ok := arm["toolUses"].([]interface{}); ok {
+				for _, tu := range toolUses {
+					tuMap := tu.(map[string]interface{})
+					if tuMap["toolUseId"] == "tooluse_exit_plan_456" {
+						foundToolUse = true
+					}
+				}
+			}
+		}
+
+		if uim, ok := historyItem["userInputMessage"].(map[string]interface{}); ok {
+			if ctx, ok := uim["userInputMessageContext"].(map[string]interface{}); ok {
+				if trs, ok := ctx["toolResults"].([]interface{}); ok {
+					for _, tr := range trs {
+						trMap := tr.(map[string]interface{})
+						if trMap["toolUseId"] == "tooluse_exit_plan_456" {
+							foundToolResult = true
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Also check currentMessage for toolResult (it may be merged there)
+	currentMsg := convState["currentMessage"].(map[string]interface{})
+	if uim, ok := currentMsg["userInputMessage"].(map[string]interface{}); ok {
+		if ctx, ok := uim["userInputMessageContext"].(map[string]interface{}); ok {
+			if trs, ok := ctx["toolResults"].([]interface{}); ok {
+				for _, tr := range trs {
+					trMap := tr.(map[string]interface{})
+					if trMap["toolUseId"] == "tooluse_exit_plan_456" {
+						foundToolResult = true
+					}
+				}
+			}
+		}
+	}
+
+	assert.True(t, foundToolUse, "ExitPlanMode toolUse should be kept (no required params)")
+	assert.True(t, foundToolResult, "ExitPlanMode toolResult should be kept")
 }

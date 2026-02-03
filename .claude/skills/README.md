@@ -4,6 +4,46 @@ This directory contains custom Claude Code skills for analyzing and debugging th
 
 ## Available Skills
 
+### diagnose-kiro-request
+
+Performs elimination-based diagnosis on failing Kiro API requests to find the exact component causing "Improperly formed request" 400 errors.
+
+**Quick Start:**
+
+```bash
+# Diagnose a specific failing request
+/diagnose-kiro-request kiro-debug/errors/SESSION_ID/kiro_request.json
+
+# Or run the Go test directly
+KIRO_REQUEST_FILE=path/to/kiro_request.json go test ./tests/integration/... -v -run TestKiroRequestDiagnose -timeout 300s
+```
+
+**What it does:**
+
+1. **Coarse elimination**: Tests without tools, history, toolResults
+2. **Binary search**: Finds exact boundary where request starts failing
+3. **Deep analysis**: Identifies empty inputs, orphan references, large content
+4. **Confirmation**: Verifies removing problem element fixes the request
+
+**Example output:**
+
+```
+[original] ✗ FAILED
+[no-history] ✓ SUCCESS
+[history-empty] ✓ SUCCESS
+[history-keep-38] ✓ SUCCESS
+[history-keep-57] ✗ FAILED
+=== Boundary: history[0:51] OK, history[0:52] FAIL ===
+=== Problem message is history[51] ===
+Problem message[51] is assistantResponseMessage
+  Has 3 toolUses
+  toolUse[1]: name=Write input_size=0
+    ⚠️ EMPTY INPUT - potential problem!
+✓ Confirmed: removing only history[51] fixes the issue
+```
+
+---
+
 ### analyze-kiro-dumps
 
 Analyzes debug dumps from the Go Kiro service's debug dumper.

@@ -316,6 +316,14 @@ func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool,
 	// Map model name to Kiro model ID
 	kiroModel, originalModel := mapModelToKiroWithOriginal(model)
 
+	// Get tools that don't require parameters (can have empty input)
+	// This is used to filter invalid toolUses from history
+	toolsNoRequiredParams := getToolsWithNoRequiredParams(tools)
+
+	// Collect all toolUseIds that were removed due to empty input.
+	// These will be used to also remove corresponding toolResults to avoid orphan references.
+	allRemovedToolUseIds := make(map[string]bool)
+
 	// Step 1: Parse and merge adjacent messages with same role (matching JS implementation)
 	type MergedMessage struct {
 		Role             string
@@ -454,8 +462,14 @@ func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool,
 			assistantMsg := map[string]interface{}{
 				"content": content,
 			}
-			if len(msg.AssistantContent.ToolUses) > 0 {
-				assistantMsg["toolUses"] = msg.AssistantContent.ToolUses
+			// Filter toolUses with empty input for tools that require parameters
+			// This prevents "Improperly formed request" errors from Kiro API
+			filteredToolUses, removedIds := filterToolUsesWithEmptyInput(msg.AssistantContent.ToolUses, toolsNoRequiredParams)
+			for id := range removedIds {
+				allRemovedToolUseIds[id] = true
+			}
+			if len(filteredToolUses) > 0 {
+				assistantMsg["toolUses"] = filteredToolUses
 			}
 			history = append(history, map[string]interface{}{
 				"assistantResponseMessage": assistantMsg,
@@ -478,8 +492,13 @@ func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool,
 		if assistantMsg["content"] == "" {
 			assistantMsg["content"] = "Continue" // Fallback content
 		}
-		if len(lastMsg.AssistantContent.ToolUses) > 0 {
-			assistantMsg["toolUses"] = lastMsg.AssistantContent.ToolUses
+		// Filter toolUses with empty input for tools that require parameters
+		filteredToolUses, removedIds := filterToolUsesWithEmptyInput(lastMsg.AssistantContent.ToolUses, toolsNoRequiredParams)
+		for id := range removedIds {
+			allRemovedToolUseIds[id] = true
+		}
+		if len(filteredToolUses) > 0 {
+			assistantMsg["toolUses"] = filteredToolUses
 		}
 		history = append(history, map[string]interface{}{
 			"assistantResponseMessage": assistantMsg,
@@ -502,6 +521,32 @@ func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool,
 				})
 			}
 		}
+	}
+
+	// Post-process: filter out toolResults that reference removed toolUses
+	// This must happen after all toolUses have been processed to collect all removedIds
+	if len(allRemovedToolUseIds) > 0 {
+		// Filter toolResults in history
+		for i, historyItem := range history {
+			if uim, ok := historyItem["userInputMessage"].(map[string]interface{}); ok {
+				if ctx, ok := uim["userInputMessageContext"].(map[string]interface{}); ok {
+					if trs, ok := ctx["toolResults"].([]map[string]interface{}); ok {
+						filtered := filterToolResults(trs, allRemovedToolUseIds)
+						if len(filtered) == 0 {
+							delete(ctx, "toolResults")
+							if len(ctx) == 0 {
+								delete(uim, "userInputMessageContext")
+							}
+						} else {
+							ctx["toolResults"] = filtered
+						}
+						history[i]["userInputMessage"] = uim
+					}
+				}
+			}
+		}
+		// Filter currentToolResults
+		currentToolResults = filterToolResults(currentToolResults, allRemovedToolUseIds)
 	}
 
 	// Kiro API requires content to never be empty
@@ -984,6 +1029,95 @@ func mapModelToKiroWithOriginal(model string) (string, string) {
 	return "CLAUDE_SONNET_4_5_20250929_V1_0", model
 }
 
+
+// getToolsWithNoRequiredParams returns a set of tool names that have no required parameters.
+// Tools in this set can have empty input {} without causing "Improperly formed request" errors.
+func getToolsWithNoRequiredParams(toolsJSON []byte) map[string]bool {
+	result := make(map[string]bool)
+	if len(toolsJSON) == 0 {
+		return result
+	}
+
+	var claudeTools []ClaudeTool
+	if err := json.Unmarshal(toolsJSON, &claudeTools); err != nil {
+		return result
+	}
+
+	for _, tool := range claudeTools {
+		// Parse input_schema to check for required fields
+		var schema struct {
+			Required []string `json:"required"`
+		}
+		if err := json.Unmarshal(tool.InputSchema, &schema); err != nil {
+			continue
+		}
+
+		// If no required fields, this tool can have empty input
+		if len(schema.Required) == 0 {
+			result[tool.Name] = true
+		}
+	}
+
+	return result
+}
+
+// filterToolUsesWithEmptyInput filters out toolUses with empty input for tools that require parameters.
+// Tools without required parameters (like ExitPlanMode, EnterPlanMode) are kept even with empty input.
+// Returns the filtered toolUses and the set of removed toolUseIds.
+// The removed toolUseIds should be used to filter out corresponding toolResults to avoid orphan references.
+func filterToolUsesWithEmptyInput(toolUses []map[string]interface{}, noRequiredParams map[string]bool) ([]map[string]interface{}, map[string]bool) {
+	removedIds := make(map[string]bool)
+	if len(toolUses) == 0 {
+		return toolUses, removedIds
+	}
+
+	var filtered []map[string]interface{}
+	for _, tu := range toolUses {
+		name, _ := tu["name"].(string)
+		toolUseId, _ := tu["toolUseId"].(string)
+		input := tu["input"]
+
+		// Check if input is empty
+		isEmptyInput := false
+		if input == nil {
+			isEmptyInput = true
+		} else if inputMap, ok := input.(map[string]interface{}); ok && len(inputMap) == 0 {
+			isEmptyInput = true
+		}
+
+		// Keep if: input is not empty, OR tool has no required params
+		// NOTE: We no longer keep toolUses just because they're referenced by toolResults.
+		// Instead, we remove both the invalid toolUse AND the corresponding toolResult.
+		if !isEmptyInput || noRequiredParams[name] {
+			filtered = append(filtered, tu)
+		} else {
+			// Track removed toolUseId so we can also remove the corresponding toolResult
+			if toolUseId != "" {
+				removedIds[toolUseId] = true
+			}
+		}
+	}
+
+	return filtered, removedIds
+}
+
+// filterToolResults removes toolResults that reference removed toolUses.
+// This prevents "Improperly formed request" errors from orphan toolResult references.
+func filterToolResults(toolResults []map[string]interface{}, removedToolUseIds map[string]bool) []map[string]interface{} {
+	if len(toolResults) == 0 || len(removedToolUseIds) == 0 {
+		return toolResults
+	}
+
+	var filtered []map[string]interface{}
+	for _, tr := range toolResults {
+		toolUseId, _ := tr["toolUseId"].(string)
+		if !removedToolUseIds[toolUseId] {
+			filtered = append(filtered, tr)
+		}
+	}
+
+	return filtered
+}
 
 // convertToolsToKiroFormat converts Claude tool definitions to Kiro format.
 // It filters out web_search/websearch tools and truncates long descriptions.
