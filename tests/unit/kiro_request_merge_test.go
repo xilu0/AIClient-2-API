@@ -721,6 +721,116 @@ func TestBuildRequestBody_FilterEmptyInputToolUses(t *testing.T) {
 
 // TestBuildRequestBody_KeepEmptyInputForNoRequiredParams tests that toolUses with empty input
 // are kept for tools that have no required parameters (like ExitPlanMode).
+// TestBuildRequestBody_AggregatesFragmentedToolUses tests that fragmented tool_use
+// blocks (from streaming history) are aggregated into a single toolUse with complete input.
+// This prevents "Improperly formed request" errors when history contains streaming fragments.
+func TestBuildRequestBody_AggregatesFragmentedToolUses(t *testing.T) {
+	// Simulate fragmented tool_use from Claude Code streaming history
+	// Each fragment has the same ID but only a piece of raw_arguments
+	messages := []map[string]interface{}{
+		{
+			"role":    "user",
+			"content": "Kill the shell",
+		},
+		{
+			"role": "assistant",
+			"content": []map[string]interface{}{
+				{"type": "text", "text": "Stopping the process."},
+				// Fragmented tool_use - first fragment (empty input)
+				{
+					"type":  "tool_use",
+					"id":    "tooluse_fragmented_123",
+					"name":  "KillShell",
+					"input": map[string]interface{}{},
+				},
+				// Fragment 1
+				{
+					"type":  "tool_use",
+					"id":    "tooluse_fragmented_123",
+					"name":  "KillShell",
+					"input": map[string]interface{}{"raw_arguments": "{\"she"},
+				},
+				// Fragment 2
+				{
+					"type":  "tool_use",
+					"id":    "tooluse_fragmented_123",
+					"name":  "KillShell",
+					"input": map[string]interface{}{"raw_arguments": "ll_id"},
+				},
+				// Fragment 3
+				{
+					"type":  "tool_use",
+					"id":    "tooluse_fragmented_123",
+					"name":  "KillShell",
+					"input": map[string]interface{}{"raw_arguments": "\": \""},
+				},
+				// Fragment 4
+				{
+					"type":  "tool_use",
+					"id":    "tooluse_fragmented_123",
+					"name":  "KillShell",
+					"input": map[string]interface{}{"raw_arguments": "abc123"},
+				},
+				// Fragment 5
+				{
+					"type":  "tool_use",
+					"id":    "tooluse_fragmented_123",
+					"name":  "KillShell",
+					"input": map[string]interface{}{"raw_arguments": "\"}"},
+				},
+			},
+		},
+		{
+			"role": "user",
+			"content": []map[string]interface{}{
+				{
+					"type":        "tool_result",
+					"tool_use_id": "tooluse_fragmented_123",
+					"content":     "Shell killed",
+				},
+			},
+		},
+		{
+			"role":    "user",
+			"content": "Continue",
+		},
+	}
+	messagesJSON, err := json.Marshal(messages)
+	require.NoError(t, err)
+
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
+	require.NoError(t, err)
+
+	var req map[string]interface{}
+	err = json.Unmarshal(body, &req)
+	require.NoError(t, err)
+
+	convState := req["conversationState"].(map[string]interface{})
+	history := convState["history"].([]interface{})
+
+	// Find the assistant message with toolUses
+	var foundToolUse map[string]interface{}
+	for _, item := range history {
+		historyItem := item.(map[string]interface{})
+		if arm, ok := historyItem["assistantResponseMessage"].(map[string]interface{}); ok {
+			if toolUses, ok := arm["toolUses"].([]interface{}); ok && len(toolUses) > 0 {
+				foundToolUse = toolUses[0].(map[string]interface{})
+				break
+			}
+		}
+	}
+
+	require.NotNil(t, foundToolUse, "Should have a toolUse in history")
+
+	// Verify: only ONE toolUse (fragments aggregated)
+	assert.Equal(t, "tooluse_fragmented_123", foundToolUse["toolUseId"])
+	assert.Equal(t, "KillShell", foundToolUse["name"])
+
+	// Verify: input is the aggregated complete JSON
+	input := foundToolUse["input"].(map[string]interface{})
+	assert.Equal(t, "abc123", input["shell_id"], "Fragmented input should be aggregated to {\"shell_id\": \"abc123\"}")
+}
+
 func TestBuildRequestBody_KeepEmptyInputForNoRequiredParams(t *testing.T) {
 	messages := []map[string]interface{}{
 		{

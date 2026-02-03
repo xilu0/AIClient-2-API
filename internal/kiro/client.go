@@ -713,6 +713,7 @@ func parseMessageContent(content json.RawMessage) ParsedUserContent {
 
 // parseAssistantContent parses an assistant message content into its components.
 // Handles text, tool_use, and thinking content blocks.
+// Also handles fragmented tool_use blocks (from streaming) by aggregating raw_arguments.
 func parseAssistantContent(content json.RawMessage) ParsedAssistantContent {
 	result := ParsedAssistantContent{}
 
@@ -737,6 +738,17 @@ func parseAssistantContent(content json.RawMessage) ParsedAssistantContent {
 		return result
 	}
 
+	// Collect tool_use blocks, grouping by ID to handle fragmented streaming data
+	// Claude Code may send history with fragmented tool_use entries where each has
+	// input.raw_arguments containing a JSON fragment
+	type toolUseFragment struct {
+		Name         string
+		RawArguments []string // Ordered fragments to concatenate
+		CompleteInput interface{} // Complete input if not fragmented
+	}
+	toolUseMap := make(map[string]*toolUseFragment)
+	toolUseOrder := []string{} // Preserve order of first occurrence
+
 	var thinkingText string
 	for _, block := range blocks {
 		switch block.Type {
@@ -753,19 +765,71 @@ func parseAssistantContent(content json.RawMessage) ParsedAssistantContent {
 				_ = json.Unmarshal(block.Input, &input)
 			}
 
-			// Normalize nil input to empty object (matches Node.js behavior)
-			// Tools like TaskList have input: {} which is valid for Kiro API
-			if input == nil {
-				input = map[string]interface{}{}
+			// Check if this is a fragmented tool_use (has raw_arguments)
+			inputMap, isMap := input.(map[string]interface{})
+			rawArg, hasRawArg := "", false
+			if isMap {
+				if ra, ok := inputMap["raw_arguments"].(string); ok {
+					rawArg = ra
+					hasRawArg = true
+				}
 			}
 
-			toolUse := map[string]interface{}{
-				"toolUseId": block.ID,
-				"name":      block.Name,
-				"input":     input,
+			if existing, ok := toolUseMap[block.ID]; ok {
+				// Append fragment to existing entry
+				if hasRawArg {
+					existing.RawArguments = append(existing.RawArguments, rawArg)
+				}
+			} else {
+				// New tool_use entry
+				fragment := &toolUseFragment{
+					Name: block.Name,
+				}
+				if hasRawArg {
+					fragment.RawArguments = []string{rawArg}
+				} else if isMap && len(inputMap) == 0 {
+					// Empty input {} - might be followed by fragments, or might be valid
+					fragment.RawArguments = []string{}
+				} else {
+					// Complete input (not fragmented)
+					fragment.CompleteInput = input
+				}
+				toolUseMap[block.ID] = fragment
+				toolUseOrder = append(toolUseOrder, block.ID)
 			}
-			result.ToolUses = append(result.ToolUses, toolUse)
 		}
+	}
+
+	// Build final toolUses from aggregated fragments
+	for _, id := range toolUseOrder {
+		fragment := toolUseMap[id]
+		var input interface{}
+
+		if fragment.CompleteInput != nil {
+			// Not fragmented, use as-is
+			input = fragment.CompleteInput
+		} else if len(fragment.RawArguments) > 0 {
+			// Aggregate raw_arguments fragments and parse as JSON
+			merged := strings.Join(fragment.RawArguments, "")
+			var parsedInput interface{}
+			if err := json.Unmarshal([]byte(merged), &parsedInput); err == nil {
+				input = parsedInput
+			} else {
+				// Failed to parse merged JSON, use empty object
+				// This shouldn't happen with valid data, but be defensive
+				input = map[string]interface{}{}
+			}
+		} else {
+			// No fragments and no complete input, use empty object
+			input = map[string]interface{}{}
+		}
+
+		toolUse := map[string]interface{}{
+			"toolUseId": id,
+			"name":      fragment.Name,
+			"input":     input,
+		}
+		result.ToolUses = append(result.ToolUses, toolUse)
 	}
 
 	// Prepend thinking content with tags if present
