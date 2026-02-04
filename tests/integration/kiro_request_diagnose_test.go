@@ -1,7 +1,6 @@
 package integration
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -56,13 +55,10 @@ func TestKiroRequestDiagnose(t *testing.T) {
 
 	// Helper to send and report result
 	sendAndReport := func(name string, reqObj map[string]interface{}) bool {
-		body, err := json.Marshal(reqObj)
+		// Use MarshalWithoutHTMLEscape to avoid Go's default HTML escaping of <, >, &
+		// which causes "Improperly formed request" errors from Kiro API
+		body, err := kiro.MarshalWithoutHTMLEscape(reqObj)
 		require.NoError(t, err)
-
-		// Compact
-		var compacted bytes.Buffer
-		json.Compact(&compacted, body)
-		body = compacted.Bytes()
 
 		t.Logf("[%s] Sending %d bytes...", name, len(body))
 
