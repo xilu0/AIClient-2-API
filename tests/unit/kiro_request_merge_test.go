@@ -943,3 +943,84 @@ func TestBuildRequestBody_KeepEmptyInputForNoRequiredParams(t *testing.T) {
 	assert.True(t, foundToolUse, "ExitPlanMode toolUse should be kept (no required params)")
 	assert.True(t, foundToolResult, "ExitPlanMode toolResult should be kept")
 }
+
+func TestBuildRequestBody_RemovesOrphanToolUses(t *testing.T) {
+	// Test that orphan toolUses (toolUses without matching toolResults) are removed
+	// This prevents "Improperly formed request" errors from Kiro API
+
+	messages := []map[string]interface{}{
+		{
+			"role": "user",
+			"content": []map[string]interface{}{
+				{"type": "text", "text": "Initial request"},
+			},
+		},
+		{
+			"role": "assistant",
+			"content": []map[string]interface{}{
+				{"type": "text", "text": "Let me run a command"},
+				{
+					"type":  "tool_use",
+					"id":    "tooluse_bash_123",
+					"name":  "Bash",
+					"input": map[string]interface{}{"command": "ls -la"},
+				},
+				{
+					"type":  "tool_use",
+					"id":    "tooluse_orphan_456",
+					"name":  "Read",
+					"input": map[string]interface{}{"file_path": "/some/file"},
+				},
+			},
+		},
+		{
+			"role": "user",
+			"content": []map[string]interface{}{
+				{
+					"type":        "tool_result",
+					"tool_use_id": "tooluse_bash_123",
+					"content":     "file1.txt\nfile2.txt",
+				},
+				// Note: NO tool_result for tooluse_orphan_456 - it's orphan
+				{"type": "text", "text": "Continue please"},
+			},
+		},
+	}
+	messagesJSON, err := json.Marshal(messages)
+	require.NoError(t, err)
+
+	body, _, err := kiro.BuildRequestBody("claude-sonnet-4", messagesJSON, 1000, true, "", "", nil)
+	require.NoError(t, err)
+
+	var req map[string]interface{}
+	err = json.Unmarshal(body, &req)
+	require.NoError(t, err)
+
+	convState := req["conversationState"].(map[string]interface{})
+	history := convState["history"].([]interface{})
+
+	// Find toolUses in history
+	foundBashToolUse := false
+	foundOrphanToolUse := false
+
+	for _, item := range history {
+		historyItem := item.(map[string]interface{})
+
+		if arm, ok := historyItem["assistantResponseMessage"].(map[string]interface{}); ok {
+			if toolUses, ok := arm["toolUses"].([]interface{}); ok {
+				for _, tu := range toolUses {
+					tuMap := tu.(map[string]interface{})
+					if tuMap["toolUseId"] == "tooluse_bash_123" {
+						foundBashToolUse = true
+					}
+					if tuMap["toolUseId"] == "tooluse_orphan_456" {
+						foundOrphanToolUse = true
+					}
+				}
+			}
+		}
+	}
+
+	assert.True(t, foundBashToolUse, "Bash toolUse should be kept (has matching toolResult)")
+	assert.False(t, foundOrphanToolUse, "Orphan Read toolUse should be removed (no matching toolResult)")
+}

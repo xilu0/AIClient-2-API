@@ -377,6 +377,19 @@ func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool,
 		mergedMessages = append(mergedMessages, newMsg)
 	}
 
+	// Step 1.5: Collect all toolResultIds from ALL user messages
+	// This is used to filter orphan toolUses (toolUses without matching toolResults)
+	allToolResultIds := make(map[string]bool)
+	for _, msg := range mergedMessages {
+		if msg.Role == "user" {
+			for _, tr := range msg.UserContent.ToolResults {
+				if id, ok := tr["toolUseId"].(string); ok && id != "" {
+					allToolResultIds[id] = true
+				}
+			}
+		}
+	}
+
 	// Step 2: Build history and current message
 	// Match Node.js behavior: if there's a system prompt and first message is user,
 	// add system+user to history first, then process remaining messages
@@ -462,10 +475,15 @@ func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool,
 			assistantMsg := map[string]interface{}{
 				"content": content,
 			}
-			// Filter toolUses with empty input for tools that require parameters
-			// This prevents "Improperly formed request" errors from Kiro API
+			// Filter toolUses:
+			// 1. Remove empty input for tools that require parameters
+			// 2. Remove orphan toolUses (no matching toolResult)
 			filteredToolUses, removedIds := filterToolUsesWithEmptyInput(msg.AssistantContent.ToolUses, toolsNoRequiredParams)
 			for id := range removedIds {
+				allRemovedToolUseIds[id] = true
+			}
+			filteredToolUses, orphanRemovedIds := filterOrphanToolUses(filteredToolUses, allToolResultIds)
+			for id := range orphanRemovedIds {
 				allRemovedToolUseIds[id] = true
 			}
 			if len(filteredToolUses) > 0 {
@@ -492,9 +510,17 @@ func BuildRequestBody(model string, messages []byte, maxTokens int, stream bool,
 		if assistantMsg["content"] == "" {
 			assistantMsg["content"] = "Continue" // Fallback content
 		}
-		// Filter toolUses with empty input for tools that require parameters
+		// Filter toolUses:
+		// 1. Remove empty input for tools that require parameters
+		// 2. Remove orphan toolUses (no matching toolResult)
+		// Note: For the last assistant message, toolResults may be in currentMessage,
+		// but those would already be included in allToolResultIds from mergedMessages
 		filteredToolUses, removedIds := filterToolUsesWithEmptyInput(lastMsg.AssistantContent.ToolUses, toolsNoRequiredParams)
 		for id := range removedIds {
+			allRemovedToolUseIds[id] = true
+		}
+		filteredToolUses, orphanRemovedIds := filterOrphanToolUses(filteredToolUses, allToolResultIds)
+		for id := range orphanRemovedIds {
 			allRemovedToolUseIds[id] = true
 		}
 		if len(filteredToolUses) > 0 {
@@ -1156,6 +1182,35 @@ func filterToolUsesWithEmptyInput(toolUses []map[string]interface{}, noRequiredP
 			filtered = append(filtered, tu)
 		} else {
 			// Track removed toolUseId so we can also remove the corresponding toolResult
+			if toolUseId != "" {
+				removedIds[toolUseId] = true
+			}
+		}
+	}
+
+	return filtered, removedIds
+}
+
+// filterOrphanToolUses removes toolUses that don't have matching toolResults.
+// This prevents "Improperly formed request" errors from orphan toolUse references.
+// A toolUse is orphan if its toolUseId is NOT in the allToolResultIds set.
+func filterOrphanToolUses(toolUses []map[string]interface{}, allToolResultIds map[string]bool) ([]map[string]interface{}, map[string]bool) {
+	removedIds := make(map[string]bool)
+	if len(toolUses) == 0 || len(allToolResultIds) == 0 {
+		// If no toolResults exist at all, we can't determine orphans,
+		// so we keep all toolUses (this handles edge cases)
+		return toolUses, removedIds
+	}
+
+	var filtered []map[string]interface{}
+	for _, tu := range toolUses {
+		toolUseId, _ := tu["toolUseId"].(string)
+
+		// Keep if there's a matching toolResult
+		if allToolResultIds[toolUseId] {
+			filtered = append(filtered, tu)
+		} else {
+			// Track removed orphan toolUseId
 			if toolUseId != "" {
 				removedIds[toolUseId] = true
 			}

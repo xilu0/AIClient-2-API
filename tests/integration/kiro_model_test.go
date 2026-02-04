@@ -43,7 +43,11 @@ func getRedisClient(t *testing.T) *redis.Client {
 	return client
 }
 
-// getHealthyAccount gets a healthy account and its token from Redis
+// getHealthyAccount gets a healthy account and its token from Redis.
+// Uses the same logic as the production Selector:
+// 1. Prefer accounts with IsHealthy=true
+// 2. Include unhealthy accounts if healthCooldown (6s) has elapsed since last error
+// 3. If no healthy accounts, use any non-disabled account as fallback
 func getHealthyAccount(t *testing.T, redisClient *redis.Client) (*redis.Account, *redis.Token) {
 	poolManager := redis.NewPoolManager(redisClient)
 	tokenManager := redis.NewTokenManager(redisClient)
@@ -60,17 +64,46 @@ func getHealthyAccount(t *testing.T, redisClient *redis.Client) (*redis.Account,
 		t.Fatal("No accounts available")
 	}
 
-	var acc *redis.Account
+	const healthCooldown = 6 * time.Second
+	now := time.Now()
+
+	var healthy []*redis.Account
+	var nonDisabled []*redis.Account
+
 	for i := range accounts {
-		if accounts[i].IsHealthy && !accounts[i].IsDisabled {
-			acc = &accounts[i]
-			break
+		acc := &accounts[i]
+		if acc.IsDisabled {
+			continue
+		}
+		nonDisabled = append(nonDisabled, acc)
+
+		// Check if healthy
+		if acc.IsHealthy {
+			healthy = append(healthy, acc)
+			continue
+		}
+
+		// Check if unhealthy account is eligible for retry (cooldown elapsed)
+		if acc.LastErrorTime != "" {
+			lastError, err := time.Parse(time.RFC3339, acc.LastErrorTime)
+			if err == nil && now.Sub(lastError) >= healthCooldown {
+				healthy = append(healthy, acc)
+			}
 		}
 	}
-	if acc == nil {
+
+	// Use healthy accounts if available, otherwise fall back to non-disabled
+	candidates := healthy
+	if len(candidates) == 0 {
+		candidates = nonDisabled
+		t.Logf("Warning: no healthy accounts, using %d non-disabled accounts as fallback", len(candidates))
+	}
+
+	if len(candidates) == 0 {
 		t.Fatal("No healthy accounts available")
 	}
 
+	acc := candidates[0]
 	token, err := tokenManager.GetToken(ctx, acc.UUID)
 	if err != nil {
 		t.Fatalf("Failed to get token for account %s: %v", acc.UUID, err)
