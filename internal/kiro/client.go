@@ -1094,6 +1094,7 @@ func mapModelToKiro(model string) string {
 func mapModelToKiroWithOriginal(model string) (string, string) {
 	modelMapping := map[string]string{
 		// Opus models - Kiro-specific uppercase format (same as Sonnet)
+		"claude-opus-4-6":          "claude-opus-4.6",
 		"claude-opus-4-5":          "CLAUDE_OPUS_4_5_20251101_V1_0",
 		"claude-opus-4.5":          "CLAUDE_OPUS_4_5_20251101_V1_0",
 		"claude-opus-4-5-20251101": "CLAUDE_OPUS_4_5_20251101_V1_0",
